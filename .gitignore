@@ -1,0 +1,15 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# build output
+packages/*/lib/
+
+# test / coverage
+coverage/
+*.log
+
+# editors / OS
+.DS_Store
+.idea/
+.vscode/
