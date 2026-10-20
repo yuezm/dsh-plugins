@@ -1,0 +1,3 @@
+- insert:
+    - id: dsh-prompt-library
+      name: '@local/dsh-prompt-library'

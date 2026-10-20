@@ -9,6 +9,14 @@ packages/*/lib/
 coverage/
 *.log
 
+# vendored agent skills (project-scope install of addyosmani/agent-skills)
+.agents/
+
+# temporary: docs and sources extracted from the DSH app.asar, plus the extractor
+.tmp-dsh-ref/
+scripts/tmp-asar.ps1
+scripts/tmp-asar-list.mjs
+
 # editors / OS
 .DS_Store
 .idea/
