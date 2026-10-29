@@ -43,7 +43,7 @@ window.__ModuleLoader__.load({
      * 防止升级时漏改。面板底部会显示它——DSH 的插件管理器没有版本选择器，
      * 你只能靠"跑着的代码自己报出版本"来确认装的是哪一版。
      */
-    const PLUGIN_VERSION = '1.1.0';
+    const PLUGIN_VERSION = '1.2.0';
     /** 持久化键，沿用 `dsh.<feature>.<version>` 约定。 */
     const STORAGE_KEY = 'dsh.prompt-library.v1';
     /** 样式标签身份，用于幂等注入与卸载移除。 */
@@ -52,6 +52,18 @@ window.__ModuleLoader__.load({
     //#endregion
 
     //#region 数据层
+
+    /**
+     * 当前会话查询端口。面板是 root 作用域的全局页面，拿不到 session 绑定，
+     * 只能在写「待插入」意图时向 sessions 服务查询"哪个是主会话"。
+     *
+     * 默认实现保守：查不到服务时 `currentId()` 返回 undefined、`isMain()` 恒真，
+     * 行为退化为旧版（意图不带目标），但不会让插件挂掉。
+     */
+    const sessionQuery = {
+      currentId: () => undefined,
+      isMain: () => true,
+    };
 
     /** 生成一个本地唯一 id；仅用于 React key 与增删改查定位。 */
     function newId() {
@@ -84,7 +96,7 @@ window.__ModuleLoader__.load({
       let state = {
         /** 持久数据：{ id, title, body, createdAt }[] */
         prompts: readPrompts(),
-        /** 待插入意图：面板写，中继消费。 */
+        /** 待插入意图：面板/命令写，目标会话的中继消费。{ text, sessionId, at } */
         pending: null,
         /** 最近一次插入回执：{ ok, reason, text, at }。 */
         result: null,
@@ -146,13 +158,38 @@ window.__ModuleLoader__.load({
           update({ prompts: state.prompts.filter((item) => item.id !== id) });
           persist();
         },
-        /** 面板的「使用」：写下意图，由 session 作用域的中继执行插入。 */
-        requestInsert(text) {
-          update({ pending: { text, at: Date.now() }, result: null });
+        /** 面板/命令的「使用」：写下意图（含目标会话），由该会话的中继执行插入。 */
+        requestInsert(text, sessionId) {
+          update({ pending: { text, sessionId, at: Date.now() }, result: null });
         },
-        /** 中继的回执：清掉意图并记录结果，供面板显示。 */
+        /**
+         * 中继认领：原子地取出并清空意图，只有目标会话能认领。
+         *
+         * 为什么必须按 sessionId 认领：`pending` 是模块级单例，而当前 DSH 里
+         * 同一时刻可能挂载多个 composer（主会话 + 嵌入式子代理对话 + 侧栏 chat
+         * 标签等）。旧版「谁先跑 effect 谁插入」会让第一个挂载的会话抢走意图，
+         * 结果提示词被插进另一个对话（用户报的"插到 sa_protocol_library 里第一个对话"）。
+         * 现在意图带上目标会话，只有目标会话的中继会认领；并且认领是原子的，
+         * 同一份意图最多落笔一次（即使同一会话有多个 composer 实例）。
+         *
+         * @returns 被认领的意图，或 null（没有意图 / 目标不匹配）。
+         */
+        claimPending(sessionId) {
+          const pending = state.pending;
+          if (pending === null) return null;
+          if (pending.sessionId !== undefined) {
+            if (pending.sessionId !== sessionId) return null;
+          } else if (!sessionQuery.isMain(sessionId)) {
+            // 未指定目标的旧式意图：只允许主会话认领，避免被隐藏/嵌入的其它会话抢走。
+            return null;
+          }
+          state = { ...state, pending: null };
+          emit();
+          return pending;
+        },
+        /** 中继的回执：记录结果，供面板显示。意图已在认领时清空，这里不再改 pending。 */
         reportResult(ok, reason, text) {
-          update({ pending: null, result: { ok, reason, text, at: Date.now() } });
+          update({ result: { ok, reason, text, at: Date.now() } });
         },
       };
     }
@@ -368,7 +405,7 @@ window.__ModuleLoader__.load({
                         key: 'use',
                         type: 'button',
                         className: 'pl-btn pl-btn-use',
-                        onClick: () => library.requestInsert(prompt.body),
+                        onClick: () => library.requestInsert(prompt.body, sessionQuery.currentId()),
                       },
                       '使用',
                     ),
@@ -430,39 +467,45 @@ window.__ModuleLoader__.load({
 
     /**
      * 插入中继。注册在 `conversation.composer.dock`（`scope: session`），
-     * 因此可以拿到 `inputActions` 并真正落笔到草稿；自身不渲染任何可见内容。
+     * 因此可以拿到 `inputActions` 与 `sessionId`，并且**只认领属于本会话的意图**。
      *
-     * 时序：面板写 pending → 用户切回对话 → composer 挂载 → 本组件挂载 →
-     * effect 读到 pending → captureInsertion() 取选区与草稿版本 →
-     * insertText() 插入一次可撤销的纯文本编辑 → 写回执并清掉 pending。
+     * 时序：面板/命令写 pending（带目标 sessionId）→ 目标会话的 composer 挂载 →
+     * 本组件 effect 原子认领 → captureInsertion() 取选区与草稿版本 →
+     * insertText() 插入一次可撤销的纯文本编辑 → 写回执。
+     *
+     * 关键点：当前 DSH 允许同一时刻存在多个 composer（主会话、嵌入式子代理对话、
+     * 侧栏 chat 标签）。因此不能"谁先挂载谁插"，必须按 sessionId 认领，否则会插错对话。
      *
      * 不做自动重试：`insertText` 在草稿处于 adjudicating/submitting 或版本已变时
      * 返回 false。此时按规范"保留结果等待用户操作"，我们只记录失败让面板提示，
      * 由用户再点一次——比静默重试更可预期。
      */
     function InsertRelay(props) {
-      const { inputActions } = props;
+      const { inputActions, sessionId } = props;
       const state = useLibrary();
       const pending = state.pending;
 
       React.useEffect(() => {
         if (pending === null || inputActions === undefined) return;
+        // 先原子认领：只有目标会话能拿到这份意图，且同一意图只会落笔一次。
+        const claimed = library.claimPending(sessionId);
+        if (claimed === null) return;
         let span;
         try {
           span = inputActions.captureInsertion();
         } catch (error) {
           console.error('[prompt-library] 取草稿选区失败：', error);
-          library.reportResult(false, 'capture-failed', pending.text);
+          library.reportResult(false, 'capture-failed', claimed.text);
           return;
         }
         let ok = false;
         try {
-          ok = inputActions.insertText(pending.text, span) === true;
+          ok = inputActions.insertText(claimed.text, span) === true;
         } catch (error) {
           console.error('[prompt-library] 插入失败：', error);
         }
-        library.reportResult(ok, ok ? null : 'rejected', pending.text);
-      }, [pending, inputActions]);
+        library.reportResult(ok, ok ? null : 'rejected', claimed.text);
+      }, [pending, inputActions, sessionId]);
 
       return null;
     }
@@ -535,6 +578,26 @@ window.__ModuleLoader__.load({
       apply(ctx) {
         ctx.effect(() => mountStyles(), 'prompt-library: styles');
 
+        // 主会话查询端口：面板是 root 作用域的全局页面，写插入意图时必须知道
+        // "用户原本在哪个会话"，才能让意图只被那个会话的中继认领。
+        // 用嵌套 ctx.inject，理由同下面的 commandUi：不改变插件整体激活条件。
+        ctx.inject(['sessions'], (scope) => {
+          const sessions = scope.get('sessions');
+          if (sessions === undefined) return;
+          const readById = () => {
+            const list = sessions.list;
+            const snapshot =
+              list !== undefined && typeof list.getSnapshot === 'function' ? list.getSnapshot() : undefined;
+            return snapshot && snapshot.byId ? snapshot.byId : {};
+          };
+          sessionQuery.currentId = () => {
+            const rows = readById();
+            return Object.values(rows).find((row) => (row?.retainedBy?.mainView ?? 0) > 0)?.id;
+          };
+          sessionQuery.isMain = (sessionId) =>
+            (readById()[sessionId]?.retainedBy?.mainView ?? 0) > 0;
+        });
+
         // 左侧栏入口：与【插件】（order 0）同级，排在它正下方。
         // list slot 按 priority 再按 order 升序，因此这里必须大于 0。
         ctx.slots.inject('sidebar.panellist', () =>
@@ -550,9 +613,20 @@ window.__ModuleLoader__.load({
         );
 
         // 插入中继：session 作用域，是唯一能拿到 inputActions 的位置。
+        //
+        // 主注册放在 `conversation.composer.dock`（会话已有消息时的 composer dock）。
+        // 备用注册放在 `conversation.input.left`——它在**新建/空白会话（hero）**的
+        // composer 里也会渲染，而 `conversation.composer.dock` 只在 variant === "composer"
+        // 时渲染。两处都挂同一个中继；认领是原子的，所以同一意图只会落笔一次。
         ctx.slots.inject('conversation.composer.dock', () =>
           ctx.slots.register(
             { name: 'conversation.composer.dock', id: 'prompt-library-insert', order: 900 },
+            InsertRelay,
+          ),
+        );
+        ctx.slots.inject('conversation.input.left', () =>
+          ctx.slots.register(
+            { name: 'conversation.input.left', id: 'prompt-library-insert-hero', order: 900 },
             InsertRelay,
           ),
         );
@@ -588,12 +662,16 @@ window.__ModuleLoader__.load({
                       label: prompt.title,
                       detail: preview(prompt.body),
                     })),
-                  onSelect: (option) => {
+                  onSelect: (option, context) => {
                     // 只认 id，再回库里取正文：不依赖框架是否透传自定义字段。
                     const prompt = library
                       .getState()
                       .prompts.find((item) => item.id === option.id);
                     if (prompt === undefined) return;
+                    // ui-commands 把「打开命令时所在的 session」原样作为 context 传给 onSelect，
+                    // 必须带上它——否则多挂载的其它 composer 会抢走意图，插到别的对话。
+                    const targetSessionId =
+                      context !== null && typeof context === 'object' ? context.sessionId : undefined;
                     // 延到下一个宏任务再写意图——**这是必需的，不是保险**。
                     //
                     // ui-commands 的顺序是：await onSelect(...) → 再用
@@ -606,7 +684,7 @@ window.__ModuleLoader__.load({
                     // guard 随即失配 → `/pro` 永远留在草稿里（实测就是这个现象）。
                     // 延后一个宏任务，消费已经在微任务链里完成，rev 也随之推进——
                     // 中继到那时才 captureInsertion()，拿到的是**新的** rev 与消费后的光标。
-                    setTimeout(() => library.requestInsert(prompt.body), 0);
+                    setTimeout(() => library.requestInsert(prompt.body, targetSessionId), 0);
                   },
                 },
               }),

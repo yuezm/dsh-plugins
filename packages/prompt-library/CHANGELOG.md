@@ -7,6 +7,23 @@ DSH 的插件管理器没有版本选择器，也不提供升级：升级 = 卸�
 所以"现在装的是哪一版"只能靠面板底部自报的版本号确认，或比内容哈希（见
 [docs/dev-notes/install-and-iteration.md](../../docs/dev-notes/install-and-iteration.md)）。
 
+## 1.2.0
+
+- **修复** 从【提示词】面板或 `/prompt` 选中提示词后，正文被插到了**另一个对话**
+  （用户现场：`sa_protocol_library` 下"第一个对话"），当前光标所在的输入框反而没收到。
+  根因：`pending` 是模块级单例且**不带目标会话**。当前 DSH（0.2.1-rc.3）同一时刻可能挂载
+  多个 composer——主会话之外，嵌入式子代理对话、侧栏 chat 标签等都会渲染
+  `conversation.composer.dock`。旧实现"谁先跑 effect 谁插入"，于是第一个挂载/先跑到的会话
+  抢走了意图，把文字落进了别的草稿。
+  修法：意图带 `sessionId`（面板用 `sessions` 服务查当前主会话，`/prompt` 用
+  `onSelect` 的 `context.sessionId`），中继**只认领属于本会话的意图**，并且认领是
+  **原子**的（`claimPending`），同一意图最多落笔一次。未指定目标的旧式意图只允许主会话
+  （`retainedBy.mainView > 0`）认领。
+- **新增** 备用中继挂到 `conversation.input.left`：新建/空白会话（hero）下
+  `conversation.composer.dock` 不渲染，旧版因此无法把提示词插进空白对话框；现在两处中继
+  共用同一份原子认领，hero 里也能插入。
+- **测试** 桩测试 62 → 68 项：新增"非目标会话不认领""命令路径定向""hero 备用中继"等断言。
+
 ## 1.1.0
 
 - **新增** 输入框内 `/prompt` 命令：popupSelect 列出提示词（最新在前），选中后插入草稿。

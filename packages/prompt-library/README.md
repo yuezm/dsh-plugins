@@ -8,20 +8,32 @@ DSH 插件：在 Web GUI 左侧栏【插件】下方新增【提示词】面板�
 |---|---|
 | 左侧栏新增【提示词】栏目 | `sidebar.panellist` 注册 `id: 'prompts'`、`order: 1`（【插件】是 `order: 0`，list slot 按 order 升序） |
 | 面板内增删改查 | `main` keyed slot 的面板页面；数据存 `localStorage` |
-| 面板内使用提示词、插入当前对话 | 面板写"待插入"意图 → session 作用域的**插入中继**执行 `captureInsertion()` + `insertText()` |
+| 面板内使用提示词、插入当前对话 | 面板写带目标 `sessionId` 的"待插入"意图 → 目标会话的**插入中继**执行 `captureInsertion()` + `insertText()` |
 | 输入框内 `/prompt` 快速调用 | `ctx.commandUi.register` 注册 popupSelect；选中后走**同一条**意图通道 |
 
-## 架构：为什么是三块注册 + 一个命令
+## 架构：为什么是四块注册 + 一个命令
 
 ```
-sidebar.panellist          →  PromptsPanelIcon      侧栏入口（只有图标）
-main[key='prompts']        →  PromptsPage           面板本体：CRUD + 搜索
-conversation.composer.dock →  InsertRelay           插入中继（session 作用域，渲染 null）
-commandUi: /prompt         →  popupSelect           键盘流入口（不自己插入，只写意图）
+sidebar.panellist            →  PromptsPanelIcon      侧栏入口（只有图标）
+main[key='prompts']          →  PromptsPage           面板本体：CRUD + 搜索
+conversation.composer.dock   →  InsertRelay           插入中继（session 作用域，渲染 null）
+conversation.input.left      →  InsertRelay           备用插入中继（覆盖空白 hero 会话）
+commandUi: /prompt           →  popupSelect           键盘流入口（不自己插入，只写意图）
 ```
 
 面板与 `/prompt` **共用同一条插入通道**：两者都只写"待插入"意图，真正的落笔只由中继一处实现。
 这样命令侧不会重复实现插入逻辑，也不会踩到"面板拿不到 `inputActions`"那个坑。
+
+**意图必须带目标会话。** `pending` 是模块级单例；当前 DSH 同一时刻可能挂载不止一个
+composer（主会话、嵌入式子代理对话、侧栏 chat 标签都会渲染 `conversation.composer.dock`）。
+若意图不带 `sessionId`，"谁先跑 effect 谁插入"就会把文字落进别的对话（1.2.0 修的就是这个）。
+现在中继只认领 `pending.sessionId === 自己的 sessionId` 的意图，且 `claimPending()` 原子清空，
+同一意图最多落笔一次。面板通过 `ctx.inject(['sessions'])` 查 `retainedBy.mainView > 0` 的
+主会话；`/prompt` 直接用 `onSelect(option, context)` 里的 `context.sessionId`。
+
+`conversation.composer.dock` 只在 `variant === "composer"` 时渲染；新建/空白会话（hero）里
+没有它，所以另有中继挂在 `conversation.input.left`（hero 与普通 composer 都会渲染）。两处
+共用同一份原子认领，不会重复插入。
 
 关键约束（都有源码依据）：
 
@@ -34,9 +46,11 @@ commandUi: /prompt         →  popupSelect           键盘流入口（不自�
    而 `conversation.composer.dock` 声明为 `{ kind: 'list', scope: 'session' }`。
    所以"面板按钮直接插入"做不到，必须由会话挂载时才存在的中继组件落笔。
 
-时序：点【使用】→ 面板写 pending → 切回对话（composer 挂载）→ 中继读到 pending →
-`captureInsertion()` 取选区与 `draftRev` → `insertText(text, span)` → 写回执并清 pending →
-面板下次打开时显示"已插入到当前草稿"。
+时序：点【使用】→ 面板查当前主会话并写 `pending = { text, sessionId }` → 切回对话（composer 挂载）→
+**只有 sessionId 匹配的中继**原子认领 → `captureInsertion()` 取选区与 `draftRev` →
+`insertText(text, span)` → 写回执 → 面板下次打开时显示"已插入到当前草稿"。
+若意图指向的会话当前没挂载（比如还没切回去），意图会保留，等该会话的 composer 出现时再插入；
+其它会话不会误领。
 
 ## 安装
 
@@ -62,11 +76,12 @@ commandUi: /prompt         →  popupSelect           键盘流入口（不自�
 | 4 | 搜索框输入正文里的词 | 列表实时筛选；无命中显示空态 |
 | 5 | 【编辑】改正文 → 保存 | 列表更新 |
 | 6 | 【删除】→【确认删除】 | 条目消失（两步确认，无阻塞弹窗） |
-| 7 | 某条点【使用】 | 面板提示"已排队：切回对话后插入"；切回对话后正文出现在草稿光标处，且**原有草稿保留**（插入是一次可撤销编辑） |
+| 7 | 某条点【使用】 | 面板提示"已排队：切回对话后插入"；切回**原来那个对话**后正文出现在草稿光标处，且**原有草稿保留**（插入是一次可撤销编辑）；其它对话不会收到这段文字 |
 | 8 | 输入框键入 `/prompt` | 菜单出现【提示词】；继续键入（如 `/pro`）可筛选 |
-| 9 | 在 `/prompt` 菜单里选中一条 | 菜单关闭，正文出现在草稿光标处，**不自动发送**，且键入的 `/pro` 被干净移除 |
-| 10 | 看面板底部 | 显示 `提示词库 v1.1.0`，与 package.json 一致 |
-| 11 | 重启 DSH 后再打开面板 | 提示词都还在 |
+| 9 | 在 `/prompt` 菜单里选中一条 | 菜单关闭，正文出现在**该输入框**光标处，**不自动发送**，且键入的 `/pro` 被干净移除 |
+| 10 | 新建一个空白对话，再点某条【使用】 | 正文出现在这个空白对话的输入框里（hero 会话也能插入） |
+| 11 | 看面板底部 | 显示 `提示词库 v1.2.0`，与 package.json 一致 |
+| 12 | 重启 DSH 后再打开面板 | 提示词都还在 |
 
 第 7、9 步是核心：插入**不自动发送**，只落到草稿。Ctrl+Z 应能撤销这一次插入。
 
@@ -106,17 +121,17 @@ if (guard.kind === "span") {
 
 所以本插件自己做两件事来兜住这个缺口：
 
-1. 面板底部显示运行中的版本（`提示词库 v1.1.0`）——一眼就能看出装的是新版还是旧版，
+1. 面板底部显示运行中的版本（`提示词库 v1.2.0`）——一眼就能看出装的是新版还是旧版，
    这是硬链接静默留旧副本这个问题唯一可靠的现场判据。
 2. `client.js` 的 `PLUGIN_VERSION` 与 `package.json` 的 `version` 由桩测试断言一致，
    升级时漏改一处会直接测试失败。
 
 变更历史见 [CHANGELOG.md](CHANGELOG.md)。
 
-## 升级到本版（1.1.0）
+## 升级到本版（1.2.0）
 
 **必须先卸载再重新安装**——profile 里的副本是旧代码，不会自己更新。
-装完看面板底部：显示 `v1.1.0` 才是新版；仍显示 `v1.0.0` 说明还是旧副本。
+装完看面板底部：显示 `v1.2.0` 才是新版；仍显示旧版本号说明还是旧副本。
 
 不想点界面时也可以用内容哈希判断（**不要看 `LinkType`，它不可靠**）：
 
@@ -144,10 +159,11 @@ DSH Desktop 会把它落盘到：
 node packages/prompt-library/smoke-test.mjs
 ```
 
-用一个极小的 React 运行时替身真正跑组件，驱动真实交互路径，覆盖 62 项：
+用一个极小的 React 运行时替身真正跑组件，驱动真实交互路径，覆盖 68 项：
 注册契约、空态、新增、标题派生、搜索、编辑、删除二次确认、
-`/prompt` 的 popupSelect 规格与选项映射、**写意图的时序契约**、版本一致性，以及
-「面板或命令写意图 → 中继 `insertText`」这条跨作用域链路（含被拒回执与重复渲染不二次插入）。
+`/prompt` 的 popupSelect 规格与选项映射、**写意图的时序契约**、**按会话定向与原子认领**、
+版本一致性，以及「面板或命令写意图 → 目标会话中继 `insertText`」这条跨作用域链路
+（含被拒回执、非目标会话不认领、hero 备用中继、重复渲染不二次插入）。
 
 **它不能证明 DSH 会渲染它、也不能证明真实 Lexical 草稿插入成功**——那只能由 DSH 自己证明。
 

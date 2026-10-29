@@ -251,6 +251,14 @@ const commandUi = {
     return () => {};
   },
 };
+// sessions 服务替身：s1 是主会话（retainedBy.mainView = 1），s2 不是。
+const sessionRows = {
+  s1: { id: 's1', retainedBy: { mainView: 1 } },
+  s2: { id: 's2', retainedBy: { mainView: 0 } },
+};
+const sessionsService = {
+  list: { getSnapshot: () => ({ byId: sessionRows }) },
+};
 plugin.apply({
   effect: (fn) => {
     effects.push(fn);
@@ -259,7 +267,8 @@ plugin.apply({
   inject: (names, callback) => {
     commandInjections.push(names.join(','));
     return callback({
-      get: (name) => (name === 'commandUi' ? commandUi : undefined),
+      get: (name) =>
+        name === 'commandUi' ? commandUi : name === 'sessions' ? sessionsService : undefined,
       effect: (fn) => fn(),
     });
   },
@@ -276,13 +285,14 @@ plugin.apply({
 });
 
 check(
-  '注入了三个槽位',
-  injections.join(',') === 'sidebar.panellist,main,conversation.composer.dock',
+  '注入了四个槽位',
+  injections.join(',') ===
+    'sidebar.panellist,main,conversation.composer.dock,conversation.input.left',
   injections.join(','),
 );
-check('注册了三条', registrations.length === 3, `got ${registrations.length}`);
+check('注册了四条', registrations.length === 4, `got ${registrations.length}`);
 
-const [panelEntry, mainEntry, relayEntry] = registrations;
+const [panelEntry, mainEntry, relayEntry, heroRelayEntry] = registrations;
 check('侧栏入口名称正确', panelEntry?.options.name === 'sidebar.panellist');
 check('侧栏入口 id 为 prompts', panelEntry?.options.id === 'prompts', String(panelEntry?.options.id));
 check('侧栏入口标签为「提示词」', panelEntry?.options.label === '提示词');
@@ -304,6 +314,10 @@ check(
 check(
   '中继注册进 session 作用域的 composer dock',
   relayEntry?.options.name === 'conversation.composer.dock',
+);
+check(
+  '另有备用中继注册进 input.left（覆盖空白 hero 会话）',
+  heroRelayEntry?.options.name === 'conversation.input.left',
 );
 check('样式通过 ctx.effect 注入', effects.length === 1, `got ${effects.length}`);
 
@@ -407,7 +421,13 @@ const inputActions = {
   },
 };
 
-relay.render({ inputActions });
+// 关键回归：面板写下的意图带目标会话 s1。另一个会话（s2）的中继即使同时挂载，
+// 也不能抢走这份意图——否则就会出现"提示词插到另一个对话"的 bug。
+const otherRelay = mount(relayEntry.component);
+otherRelay.render({ inputActions, sessionId: 's2' });
+check('非目标会话的中继不会认领（不会插到别的对话）', calls.length === 0, `got ${calls.length}`);
+
+relay.render({ inputActions, sessionId: 's1' });
 check('中继不渲染任何内容', relay.tree === null, String(relay.tree));
 check('insertText 被调用一次', calls.length === 1, `got ${calls.length}`);
 check('插入的是正文原文', calls[0]?.text === '第二行才是重点\n其余内容', JSON.stringify(calls[0]?.text));
@@ -416,14 +436,14 @@ check('传入了 captureInsertion 返回的 span（含 draftRev）', calls[0]?.s
 panel.render();
 check('面板显示插入成功', textOf(panel.tree).includes('已插入到当前草稿'));
 
-relay.render({ inputActions });
+relay.render({ inputActions, sessionId: 's1' });
 check('重复渲染不会二次插入', calls.length === 1, `got ${calls.length}`);
 
 section('9. 插入被拒时的回执');
 click(buttons(rowWith(panel.tree, '代码审查（改）'), '使用', true)[0]);
 panel.render();
 accept = false;
-relay.render({ inputActions });
+relay.render({ inputActions, sessionId: 's1' });
 check('失败也调用了 insertText', calls.length === 2, `got ${calls.length}`);
 panel.render();
 check('面板显示失败原因', textOf(panel.tree).includes('未插入：草稿正忙或已被改动'));
@@ -432,7 +452,7 @@ accept = true;
 section('10. 中继的防御性');
 let threw = false;
 try {
-  relay.render({ inputActions: undefined });
+  relay.render({ inputActions: undefined, sessionId: 's1' });
 } catch (error) {
   threw = true;
   console.log(`        threw: ${error.message}`);
@@ -450,7 +470,11 @@ check('删除已落盘', storedPrompts()?.length === 1, String(storedPrompts()?.
 check('列表不再显示该条目', !textOf(panel.tree).includes('代码审查（改）'));
 
 section('12. /prompt 命令');
-check('通过嵌套 inject 等待 commandUi', commandInjections.join(',') === 'commandUi', commandInjections.join(','));
+check(
+  '通过嵌套 inject 等待 sessions 与 commandUi',
+  commandInjections.join(',') === 'sessions,commandUi',
+  commandInjections.join(','),
+);
 check('注册了一个命令', commandRegistrations.length === 1, `got ${commandRegistrations.length}`);
 const cmd = commandRegistrations[0] ?? { ui: {} };
 check('命令名为 prompt', cmd.name === 'prompt', String(cmd.name));
@@ -504,7 +528,7 @@ await tick();
 panel.render();
 check('下一个宏任务之后才写意图', textOf(panel.tree).includes('已排队：切回对话后插入'));
 
-relay.render({ inputActions });
+relay.render({ inputActions, sessionId: 's1' });
 check(
   '选中后经中继插入恰一次',
   calls.length === callsBeforeSelect + 1,
@@ -513,6 +537,41 @@ check(
 check(
   '插入的是该条正文原文',
   calls[calls.length - 1]?.text === '来自命令测试的正文',
+  JSON.stringify(calls[calls.length - 1]?.text),
+);
+
+// 命令路径也必须带目标会话：用 s2 右键选中，s1 的中继不得认领。
+const beforeCommandTarget = calls.length;
+cmd.ui.onSelect(options[0], { sessionId: 's2' });
+await tick();
+relay.render({ inputActions, sessionId: 's1' });
+check(
+  '命令路径：非目标会话的中继不会认领',
+  calls.length === beforeCommandTarget,
+  `got ${calls.length - beforeCommandTarget}`,
+);
+relay.render({ inputActions, sessionId: 's2' });
+check(
+  '命令路径：目标会话的中继才插入',
+  calls.length === beforeCommandTarget + 1,
+  `got ${calls.length - beforeCommandTarget}`,
+);
+
+section('13. 空白会话（hero）的备用中继');
+const heroRelay = mount(heroRelayEntry.component);
+const beforeHero = calls.length;
+click(buttons(rowWith(panel.tree, '第二行才是重点'), '使用', true)[0]);
+panel.render();
+heroRelay.render({ inputActions, sessionId: 's1' });
+panel.render();
+check(
+  '空白会话下 input.left 中继也能插入',
+  calls.length === beforeHero + 1,
+  `got ${calls.length - beforeHero}`,
+);
+check(
+  '插入的是该条正文原文',
+  calls[calls.length - 1]?.text === '第二行才是重点\n其余内容',
   JSON.stringify(calls[calls.length - 1]?.text),
 );
 
