@@ -16,6 +16,8 @@ import { readFileSync } from 'node:fs';
 
 /** package.json 的版本，用于断言面板自报的版本没有漂移。 */
 const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8'));
+/** client.js 源码：用于锁住"编辑弹窗必须固定定位"这条样式契约。 */
+const clientSource = readFileSync(new URL('./client.js', import.meta.url), 'utf8');
 
 /** 让出一个宏任务边界，用于验证"写意图被延后到消费 token 之后"的时序契约。 */
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -203,6 +205,10 @@ const titleFieldOf = (tree) =>
   fields(tree).find((node) => node.props.placeholder === '留空则取正文首行');
 const bodyFieldOf = (tree) => fields(tree).find((node) => node.type === 'textarea');
 
+/** 模态对话框及其遮罩层。 */
+const dialogOf = (tree) => collect(tree).find((node) => node.props?.role === 'dialog');
+const modalOf = (tree) => collect(tree).find((node) => node.props?.className === 'pl-modal');
+
 function rowWith(tree, title) {
   return collect(tree).find((node) => node.type === 'li' && textOf(node).includes(title));
 }
@@ -320,6 +326,10 @@ check(
   heroRelayEntry?.options.name === 'conversation.input.left',
 );
 check('样式通过 ctx.effect 注入', effects.length === 1, `got ${effects.length}`);
+check(
+  '模态遮罩使用 position:fixed（不随列表滚动，旧版内联编辑器回归守卫）',
+  /\.pl-modal\{[^}]*position:fixed/.test(clientSource),
+);
 
 // 侧栏入口只提供图标：验证它按请求的边长画出来。
 const icon = mount(panelEntry.component);
@@ -342,6 +352,28 @@ check(
 );
 
 section('4. 新增');
+click(buttons(panel.tree, '新增', true)[0]);
+panel.render();
+check(
+  '新增打开的是 role=dialog 的模态层',
+  dialogOf(panel.tree)?.props['aria-modal'] === true && modalOf(panel.tree) !== undefined,
+);
+check(
+  '新增对话框标题为「新增提示词」',
+  textOf(dialogOf(panel.tree)).includes('新增提示词'),
+  textOf(dialogOf(panel.tree)),
+);
+// 回归：旧实现的编辑器内联在搜索框下面，列表一长就出现在视口外；现在必须是
+// 固定定位的模态层，无论列表滚到哪里都可见（桩测试只能锁结构，视觉由 CSS 保证）。
+const addDialog = dialogOf(panel.tree);
+addDialog.props.onKeyDown({
+  key: 'Escape',
+  shiftKey: false,
+  preventDefault: () => {},
+});
+panel.render();
+check('Esc 关闭对话框', dialogOf(panel.tree) === undefined && titleFieldOf(panel.tree) === undefined);
+
 click(buttons(panel.tree, '新增', true)[0]);
 panel.render();
 check(
@@ -396,6 +428,15 @@ section('7. 编辑');
 const row1 = rowWith(panel.tree, '代码审查');
 click(buttons(row1, '编辑', true)[0]);
 panel.render();
+check(
+  '编辑对话框标题为「编辑提示词」',
+  textOf(dialogOf(panel.tree)).includes('编辑提示词'),
+  textOf(dialogOf(panel.tree)),
+);
+check(
+  '编辑器不再是列表上方的内联区块（.pl-editor 已移除）',
+  collect(panel.tree).every((node) => node.props?.className !== 'pl-editor'),
+);
 typeInto(titleFieldOf(panel.tree), '代码审查（改）');
 typeInto(bodyFieldOf(panel.tree), '改过的正文');
 panel.render();

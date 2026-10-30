@@ -43,7 +43,7 @@ window.__ModuleLoader__.load({
      * 防止升级时漏改。面板底部会显示它——DSH 的插件管理器没有版本选择器，
      * 你只能靠"跑着的代码自己报出版本"来确认装的是哪一版。
      */
-    const PLUGIN_VERSION = '1.2.0';
+    const PLUGIN_VERSION = '1.2.1';
     /** 持久化键，沿用 `dsh.<feature>.<version>` 约定。 */
     const STORAGE_KEY = 'dsh.prompt-library.v1';
     /** 样式标签身份，用于幂等注入与卸载移除。 */
@@ -263,6 +263,100 @@ window.__ModuleLoader__.load({
       // null = 未在编辑；{ id: null } = 新增；{ id } = 编辑既有条目
       const [editing, setEditing] = React.useState(null);
       const [confirmingId, setConfirmingId] = React.useState(null);
+      const dialogRef = React.useRef(null);
+      const titleInputRef = React.useRef(null);
+      const bodyInputRef = React.useRef(null);
+      /** 编辑器以模态层呈现；只有它的打开/关闭才需要移动焦点。 */
+      const dialogOpen = editing !== null;
+
+      /**
+       * 弹窗打开时把焦点送进表单：新增先填标题，编辑优先正文（点【编辑】通常就是改正文）。
+       * 关闭时把焦点归还给原来的触发按钮，键盘用户不会丢失位置。
+       *
+       * 依赖只写 `dialogOpen`：每输入一个字都会生成新的 editing 对象，若把它放进依赖，
+       * 光标会被重新聚焦到末尾。
+       */
+      React.useEffect(() => {
+        if (!dialogOpen) return undefined;
+        const previous = typeof document === 'undefined' ? null : document.activeElement;
+        const target =
+          editing !== null && editing.id === null ? titleInputRef.current : bodyInputRef.current;
+        if (target !== null && target !== undefined && typeof target.focus === 'function') {
+          target.focus();
+          if (typeof target.setSelectionRange === 'function') {
+            try {
+              target.setSelectionRange(target.value.length, target.value.length);
+            } catch (error) {
+              // 个别 input 类型不支持 setSelectionRange；聚焦成功即可。
+            }
+          }
+        }
+        return () => {
+          if (
+            previous !== null &&
+            previous !== undefined &&
+            typeof previous.focus === 'function' &&
+            previous.isConnected !== false
+          ) {
+            previous.focus();
+          }
+        };
+      }, [dialogOpen]);
+
+      /** 弹窗打开期间 Esc 随时可取消：焦点偶尔离开弹层（例如点了遮罩内的空白）也不失效。 */
+      React.useEffect(() => {
+        if (!dialogOpen || typeof document === 'undefined') return undefined;
+        const onKeyDown = (event) => {
+          if (event.key !== 'Escape' || event.isComposing) return;
+          event.preventDefault();
+          setEditing(null);
+        };
+        document.addEventListener('keydown', onKeyDown);
+        return () => document.removeEventListener('keydown', onKeyDown);
+      }, [dialogOpen]);
+
+      /** 模态层键盘规则：Esc 取消；Tab 在弹窗内循环，不跑到背后的列表上。 */
+      const handleDialogKeyDown = (event) => {
+        // 中文输入法正在组词时，Esc 是取消候选，不应该顺手关掉弹窗。
+        if (event.nativeEvent !== undefined && event.nativeEvent.isComposing === true) return;
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          setEditing(null);
+          return;
+        }
+        if (event.key !== 'Tab') return;
+        const root = dialogRef.current;
+        if (root === null || root === undefined || typeof root.querySelectorAll !== 'function') return;
+        if (typeof document === 'undefined') return;
+        const focusables = Array.from(
+          root.querySelectorAll(
+            'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
+          ),
+        );
+        if (focusables.length === 0) return;
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        const active = document.activeElement;
+        // 点击标题/空白等非可聚焦区域后 activeElement 可能落到 body：先把焦点拉回弹窗。
+        if (typeof root.contains === 'function' && !root.contains(active)) {
+          event.preventDefault();
+          (event.shiftKey ? last : first).focus();
+          return;
+        }
+        // 弹窗本体的 tabIndex=-1 也可能被点中：Tab 从它出发时同样回到第一个/最后一个控件。
+        if (active === root) {
+          event.preventDefault();
+          (event.shiftKey ? last : first).focus();
+          return;
+        }
+        if (event.shiftKey && active === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && active === last) {
+          event.preventDefault();
+          first.focus();
+        }
+      };
 
       const visible = filterPrompts(state.prompts, query);
 
@@ -327,58 +421,99 @@ window.__ModuleLoader__.load({
           ? null
           : h('p', { key: 'status', className: 'pl-status', role: 'status' }, status),
 
+        // 弹出规则：新增与编辑统一使用「视口居中的模态层」，不跟随列表滚动位置。
+        // 这样无论从列表顶部还是最底部触发，编辑框都出现在同一处、必然可见。
         editing === null
           ? null
-          : h('section', { key: 'editor', className: 'pl-editor' }, [
+          : h(
+              'div',
+              {
+                key: 'editor',
+                className: 'pl-modal',
+                // 点遮罩空白处取消；点弹窗本体（含输入框）不会误关。
+                onMouseDown: (event) => {
+                  if (event.button !== 0) return;
+                  if (event.target === event.currentTarget) setEditing(null);
+                },
+              },
               h(
-                'label',
-                { key: 'titleField', className: 'pl-field' },
-                h('span', { className: 'pl-label' }, '标题'),
-                h('input', {
-                  type: 'text',
-                  className: 'pl-input',
-                  value: editing.title,
-                  placeholder: '留空则取正文首行',
-                  onChange: (event) =>
-                    setEditing((prev) => ({ ...prev, title: event.target.value })),
-                }),
+                'div',
+                {
+                  ref: dialogRef,
+                  className: 'pl-dialog',
+                  role: 'dialog',
+                  'aria-modal': true,
+                  'aria-labelledby': 'pl-dialog-title',
+                  tabIndex: -1,
+                  onKeyDown: handleDialogKeyDown,
+                },
+                [
+                  h('header', { key: 'head', className: 'pl-dialog-head' }, [
+                    h(
+                      'h2',
+                      { key: 'title', id: 'pl-dialog-title', className: 'pl-dialog-title' },
+                      editing.id === null ? '新增提示词' : '编辑提示词',
+                    ),
+                    h(
+                      'p',
+                      { key: 'hint', className: 'pl-dialog-hint' },
+                      editing.id === null ? '标题可留空，默认取正文首行。' : '保存后立即生效。',
+                    ),
+                  ]),
+                  h(
+                    'label',
+                    { key: 'titleField', className: 'pl-field' },
+                    h('span', { className: 'pl-label' }, '标题'),
+                    h('input', {
+                      ref: titleInputRef,
+                      type: 'text',
+                      className: 'pl-input',
+                      value: editing.title,
+                      placeholder: '留空则取正文首行',
+                      onChange: (event) =>
+                        setEditing((prev) => ({ ...prev, title: event.target.value })),
+                    }),
+                  ),
+                  h(
+                    'label',
+                    { key: 'bodyField', className: 'pl-field' },
+                    h('span', { className: 'pl-label' }, '正文'),
+                    h('textarea', {
+                      ref: bodyInputRef,
+                      className: 'pl-textarea',
+                      value: editing.body,
+                      rows: 8,
+                      placeholder: '提示词正文',
+                      onChange: (event) =>
+                        setEditing((prev) => ({ ...prev, body: event.target.value })),
+                    }),
+                  ),
+                  h('div', { key: 'actions', className: 'pl-editor-actions' }, [
+                    h(
+                      'button',
+                      {
+                        key: 'save',
+                        type: 'button',
+                        className: 'pl-btn pl-btn-primary',
+                        disabled: editing.body.trim() === '',
+                        onClick: save,
+                      },
+                      '保存',
+                    ),
+                    h(
+                      'button',
+                      {
+                        key: 'cancel',
+                        type: 'button',
+                        className: 'pl-btn',
+                        onClick: () => setEditing(null),
+                      },
+                      '取消',
+                    ),
+                  ]),
+                ],
               ),
-              h(
-                'label',
-                { key: 'bodyField', className: 'pl-field' },
-                h('span', { className: 'pl-label' }, '正文'),
-                h('textarea', {
-                  className: 'pl-textarea',
-                  value: editing.body,
-                  rows: 8,
-                  placeholder: '提示词正文',
-                  onChange: (event) => setEditing((prev) => ({ ...prev, body: event.target.value })),
-                }),
-              ),
-              h('div', { key: 'actions', className: 'pl-editor-actions' }, [
-                h(
-                  'button',
-                  {
-                    key: 'save',
-                    type: 'button',
-                    className: 'pl-btn pl-btn-primary',
-                    disabled: editing.body.trim() === '',
-                    onClick: save,
-                  },
-                  '保存',
-                ),
-                h(
-                  'button',
-                  {
-                    key: 'cancel',
-                    type: 'button',
-                    className: 'pl-btn',
-                    onClick: () => setEditing(null),
-                  },
-                  '取消',
-                ),
-              ]),
-            ]),
+            ),
 
         visible.length === 0
           ? h(
@@ -531,7 +666,11 @@ window.__ModuleLoader__.load({
 .pl-input{height:40px;width:100%}
 .pl-textarea{min-height:160px;padding:10px 14px;line-height:20px;resize:vertical;width:100%}
 .pl-input:focus,.pl-textarea:focus{border-color:var(--dsw-alias-state-business-primary);box-shadow:inset 0 0 0 .5px var(--dsw-alias-state-business-primary)}
-.pl-editor{border:.5px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-lg);background:var(--dsw-alias-bg-layer-1);display:flex;flex-direction:column;gap:12px;padding:14px}
+.pl-modal{position:fixed;z-index:1000;top:var(--dsh-frame-chrome-top,0px);right:0;bottom:0;left:0;display:flex;align-items:center;justify-content:center;padding:24px;background:color-mix(in srgb,var(--dsw-static-neutral-1000,#000) 36%,transparent);max-width:none;width:auto;margin:0;overscroll-behavior:contain}
+.pl-dialog{box-sizing:border-box;display:flex;flex-direction:column;gap:14px;width:min(640px,100%);max-height:100%;overflow:auto;padding:20px;border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-lg);background:var(--dsw-alias-bg-layer-1);box-shadow:var(--dsw-elevation-prominent);color:var(--dsw-alias-label-primary);overscroll-behavior:contain}
+.pl-dialog-head{display:flex;flex-direction:column;gap:2px}
+.pl-dialog-title{margin:0;font-size:17px;font-weight:600;line-height:24px}
+.pl-dialog-hint{color:var(--dsw-alias-label-secondary);margin:0;font-size:12.5px;line-height:18px}
 .pl-field{display:flex;flex-direction:column;gap:6px;font-size:13px}
 .pl-label{color:var(--dsw-alias-label-secondary)}
 .pl-editor-actions{display:flex;gap:8px;justify-content:flex-end}
