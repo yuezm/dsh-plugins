@@ -1,6 +1,6 @@
 # 提示词库（@local/dsh-prompt-library）
 
-DSH 插件：在 Web GUI 左侧栏【插件】下方新增【提示词】面板，管理常用提示词并把它们插入当前对话草稿。
+DSH 插件：在 Web GUI 左侧栏【插件】下方新增【提示词】面板，**按分组管理**常用提示词并把它们插入当前对话草稿。
 
 ## 需求映射
 
@@ -8,6 +8,8 @@ DSH 插件：在 Web GUI 左侧栏【插件】下方新增【提示词】面板�
 |---|---|
 | 左侧栏新增【提示词】栏目 | `sidebar.panellist` 注册 `id: 'prompts'`、`order: 1`（【插件】是 `order: 0`，list slot 按 order 升序） |
 | 面板内增删改查 | `main` keyed slot 的面板页面；数据存 `localStorage` |
+| 分组管理同类提示词 | 每条提示词带 `groupId`；面板按分组分区展示，可新建/重命名/删除分组、在编辑器里改归属 |
+| 按当前提示词自动分组 | 内置本地关键词分类规则；旧数据首次加载自动归类，面板另有【自动分组】按钮 |
 | 面板内使用提示词、插入当前对话 | 面板写带目标 `sessionId` 的"待插入"意图 → 目标会话的**插入中继**执行 `captureInsertion()` + `insertText()` |
 | 输入框内 `/prompt` 快速调用 | `ctx.commandUi.register` 注册 popupSelect；选中后走**同一条**意图通道 |
 
@@ -15,7 +17,7 @@ DSH 插件：在 Web GUI 左侧栏【插件】下方新增【提示词】面板�
 
 ```
 sidebar.panellist            →  PromptsPanelIcon      侧栏入口（只有图标）
-main[key='prompts']          →  PromptsPage           面板本体：CRUD + 搜索
+main[key='prompts']          →  PromptsPage           面板本体：CRUD + 搜索 + 分组
 conversation.composer.dock   →  InsertRelay           插入中继（session 作用域，渲染 null）
 conversation.input.left      →  InsertRelay           备用插入中继（覆盖空白 hero 会话）
 commandUi: /prompt           →  popupSelect           键盘流入口（不自己插入，只写意图）
@@ -52,6 +54,26 @@ composer（主会话、嵌入式子代理对话、侧栏 chat 标签都会渲染
 若意图指向的会话当前没挂载（比如还没切回去），意图会保留，等该会话的 composer 出现时再插入；
 其它会话不会误领。
 
+## 分组与自动归类
+
+**数据模型**：`prompts[]` 每条多一个可选 `groupId`；另有 `groups[]`（`{ id, name, createdAt }`）。
+`groupId` 缺失 / 指向已删除的分组时显示在「未分组」区。删分组只把组内提示词退回未分组，不删提示词。
+
+**面板交互**：列表按分组分区显示（可折叠），组头有计数与【重命名】【删除分组】；顶部有
+【自动分组】【新建分组】【新增】；新增/编辑对话框里用下拉框选择归属分组。
+`/prompt` 命令弹窗也按分组排序：每个选项带 `group: { name, label }`，framework 会渲染成
+吸顶分组标题，组内最新在前、未分组垫底。
+
+**自动分组**是纯本地启发式（`CATEGORY_RULES` + `classifyPrompt`），不依赖模型、不联网：
+每个分类按命中关键词的**长度之和**打分，取得分最高且大于 0 的分类；ASCII 关键词按**整词**匹配
+（`review` 不会命中 `preview`、`test` 不会命中 `latest`），同一分类内长词已命中时不再重复计被包含的短词；
+对不上任何分类的保持未分组。它只处理「未分组」的条目，用户手动指定的分组不会被覆盖。
+
+**旧数据迁移**：旧版（≤1.2.x）的存储是 `{ prompts: [...] }`、没有 `groups` 字段。新版第一次加载
+读到这种数据时，会自动跑一次 `autoAssign()`，把已有提示词按内容归类并落盘；迁移后数据里就有了
+`groups` 字段，之后清空分组也不会被重新自动分类。所以「根据当前提示词自动生成并分配分组」对
+历史数据是即时生效的，不需要手动点按钮。
+
 ## 安装
 
 1. 侧栏【插件】→ **添加插件**
@@ -80,8 +102,13 @@ composer（主会话、嵌入式子代理对话、侧栏 chat 标签都会渲染
 | 8 | 输入框键入 `/prompt` | 菜单出现【提示词】；继续键入（如 `/pro`）可筛选 |
 | 9 | 在 `/prompt` 菜单里选中一条 | 菜单关闭，正文出现在**该输入框**光标处，**不自动发送**，且键入的 `/pro` 被干净移除 |
 | 10 | 新建一个空白对话，再点某条【使用】 | 正文出现在这个空白对话的输入框里（hero 会话也能插入） |
-| 11 | 看面板底部 | 显示 `提示词库 v1.2.1`，与 package.json 一致 |
-| 12 | 重启 DSH 后再打开面板 | 提示词都还在 |
+| 11 | 升级后首次打开面板（旧数据没有分组） | 已有提示词被自动归类，列表按分组分区显示 |
+| 12 | 顶部点【自动分组】 | 未分组的条目按内容归入「测试与质量 / 图像与设计 / …」；对不上的保持未分组 |
+| 13 | 【新建分组】→ 填名称 → 保存 | 新分组出现在列表（可折叠），编辑器分组下拉里可选 |
+| 14 | 编辑某条 → 改分组下拉 → 保存 | 条目移动到目标分组 |
+| 15 | 组头【重命名】/【删除分组】 | 重命名立即生效；删除分组需二次确认，组内提示词回到「未分组」且不删除 |
+| 16 | 看面板底部 | 显示 `提示词库 v1.3.0`，与 package.json 一致 |
+| 17 | 重启 DSH 后再打开面板 | 提示词与分组都还在 |
 
 第 7、9 步是核心：插入**不自动发送**，只落到草稿。Ctrl+Z 应能撤销这一次插入。
 
@@ -121,17 +148,17 @@ if (guard.kind === "span") {
 
 所以本插件自己做两件事来兜住这个缺口：
 
-1. 面板底部显示运行中的版本（`提示词库 v1.2.1`）——一眼就能看出装的是新版还是旧版，
+1. 面板底部显示运行中的版本（`提示词库 v1.3.0`）——一眼就能看出装的是新版还是旧版，
    这是硬链接静默留旧副本这个问题唯一可靠的现场判据。
 2. `client.js` 的 `PLUGIN_VERSION` 与 `package.json` 的 `version` 由桩测试断言一致，
    升级时漏改一处会直接测试失败。
 
 变更历史见 [CHANGELOG.md](CHANGELOG.md)。
 
-## 升级到本版（1.2.1）
+## 升级到本版（1.3.0）
 
 **必须先卸载再重新安装**——profile 里的副本是旧代码，不会自己更新。
-装完看面板底部：显示 `v1.2.1` 才是新版；仍显示旧版本号说明还是旧副本。
+装完看面板底部：显示 `v1.3.0` 才是新版；仍显示旧版本号说明还是旧副本。
 
 不想点界面时也可以用内容哈希判断（**不要看 `LinkType`，它不可靠**）：
 
@@ -144,8 +171,10 @@ $p = "$env:DSH_PROFILE_DIR\node_modules\@local\dsh-prompt-library\client.js"
 
 ## 数据存放
 
-`localStorage` 键 `dsh.prompt-library.v1`，值形如 `{"prompts":[{"id","title","body","createdAt"}]}`。
-DSH Desktop 会把它落盘到：
+`localStorage` 键 `dsh.prompt-library.v1`，值形如
+`{"prompts":[{"id","title","body","createdAt","groupId"}],"groups":[{"id","name","createdAt"}]}`。
+旧版只有 `{"prompts":[...]}`（无 `groups` 字段），新版首次加载会就地补全 `groups` 与各条的
+`groupId`。DSH Desktop 会把它落盘到：
 
 ```
 %APPDATA%\dsh-desktop\harness\profiles\web\desktop-storage.json
@@ -159,8 +188,9 @@ DSH Desktop 会把它落盘到：
 node packages/prompt-library/smoke-test.mjs
 ```
 
-用一个极小的 React 运行时替身真正跑组件，驱动真实交互路径，覆盖 74 项：
+用一个极小的 React 运行时替身真正跑组件，驱动真实交互路径，覆盖 107 项：
 注册契约、空态、新增、标题派生、搜索、编辑、删除二次确认、**编辑/新增的模态弹层**、
+**分组的新建/归类/重命名/删除、自动分组、旧数据自动迁移**、
 `/prompt` 的 popupSelect 规格与选项映射、**写意图的时序契约**、**按会话定向与原子认领**、
 版本一致性，以及「面板或命令写意图 → 目标会话中继 `insertText`」这条跨作用域链路
 （含被拒回执、非目标会话不认领、hero 备用中继、重复渲染不二次插入）。
@@ -182,6 +212,9 @@ node packages/prompt-library/smoke-test.mjs
   ——这正是 `attachPersistence` 的实现，且已由 A1 探针实测落盘并跨重启存活。
 - **`label` 用纯字符串**：panellist 的 `label` 明确支持"字符串或 locale-aware"，字符串是文档允许的形式。
 - **没有标签/置顶/变量占位符/批量导入**：见 `docs/ideas/prompt-library.md` 的 Not Doing 清单。
+- **自动分组是本地关键词启发式**（`CATEGORY_RULES`），只覆盖常见类别（测试、代码审查、图像、写作、
+  翻译、数据分析、产品、架构、运维、教学、提示词工程）；对不上任何分类的保持「未分组」，
+  可手动改。它不调用模型、不联网，因此不会越用越聪明——类别不够时改 `CATEGORY_RULES` 即可。
 
 ## 迭代方式
 

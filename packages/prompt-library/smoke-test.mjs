@@ -228,6 +228,27 @@ function storedPrompts() {
   return JSON.parse(raw).prompts;
 }
 
+function storedGroups() {
+  const raw = memory.get('dsh.prompt-library.v1');
+  if (raw === undefined) return null;
+  const parsed = JSON.parse(raw);
+  return Array.isArray(parsed.groups) ? parsed.groups : null;
+}
+
+/** 弹窗里的分组下拉框。 */
+const groupSelectOf = (tree) => collect(tree).find((node) => node.type === 'select');
+/** 分组名输入框（占位文字用于和标题/搜索区分）。 */
+const groupNameFieldOf = (tree) =>
+  fields(tree).find((node) => node.props.placeholder === '分组名称');
+
+/** 取某条提示词当前所属分组名（用于断言自动归类结果）。 */
+function groupNameOfPrompt(title) {
+  const data = JSON.parse(memory.get('dsh.prompt-library.v1'));
+  const prompt = data.prompts.find((item) => item.title === title);
+  const group = (data.groups ?? []).find((item) => item.id === prompt?.groupId);
+  return group?.name ?? null;
+}
+
 //#endregion
 
 //#region 装载被测模块
@@ -614,6 +635,208 @@ check(
   '插入的是该条正文原文',
   calls[calls.length - 1]?.text === '第二行才是重点\n其余内容',
   JSON.stringify(calls[calls.length - 1]?.text),
+);
+
+section('14. 手动分组（新建 / 归类 / 重命名 / 删除）');
+click(buttons(panel.tree, '新建分组', true)[0]);
+panel.render();
+check(
+  '新建分组对话框标题为「新建分组」',
+  textOf(dialogOf(panel.tree)).includes('新建分组'),
+  textOf(dialogOf(panel.tree)),
+);
+check('分组名为空时保存禁用', buttons(panel.tree, '保存', true)[0]?.props.disabled === true);
+typeInto(groupNameFieldOf(panel.tree), '我的分组');
+panel.render();
+click(buttons(panel.tree, '保存', true)[0]);
+panel.render();
+check(
+  '分组已落盘',
+  storedGroups()?.length === 1 && storedGroups()[0].name === '我的分组',
+  JSON.stringify(storedGroups()),
+);
+check('面板显示新分组', textOf(panel.tree).includes('我的分组'));
+
+const manualGroupId = storedGroups()[0].id;
+click(buttons(rowWith(panel.tree, '最新一条'), '编辑', true)[0]);
+panel.render();
+check('编辑对话框含分组下拉框', groupSelectOf(panel.tree) !== undefined);
+typeInto(groupSelectOf(panel.tree), manualGroupId);
+panel.render();
+click(buttons(panel.tree, '保存', true)[0]);
+panel.render();
+check(
+  '编辑提示词可改所属分组',
+  JSON.parse(memory.get('dsh.prompt-library.v1')).prompts.find((p) => p.title === '最新一条')
+    ?.groupId === manualGroupId,
+);
+
+click(buttons(panel.tree, '重命名', true)[0]);
+panel.render();
+check('重命名对话框标题为「重命名分组」', textOf(dialogOf(panel.tree)).includes('重命名分组'));
+typeInto(groupNameFieldOf(panel.tree), '改名后的分组');
+panel.render();
+click(buttons(panel.tree, '保存', true)[0]);
+panel.render();
+check('分组已重命名', storedGroups()[0]?.name === '改名后的分组', JSON.stringify(storedGroups()));
+check('面板显示新组名', textOf(panel.tree).includes('改名后的分组'));
+
+click(buttons(panel.tree, '删除分组', true)[0]);
+panel.render();
+check('删除分组需要二次确认', buttons(panel.tree, '确认删除分组', true).length === 1);
+click(buttons(panel.tree, '确认删除分组', true)[0]);
+panel.render();
+check(
+  '分组已删除',
+  Array.isArray(storedGroups()) && storedGroups().length === 0,
+  JSON.stringify(storedGroups()),
+);
+check(
+  '组内提示词回到未分组',
+  JSON.parse(memory.get('dsh.prompt-library.v1')).prompts.find((p) => p.title === '最新一条')
+    ?.groupId === undefined,
+);
+check('面板显示未分组区', textOf(panel.tree).includes('未分组'));
+
+section('15. 自动分组（按内容归类）');
+click(buttons(panel.tree, '新增', true)[0]);
+panel.render();
+typeInto(titleFieldOf(panel.tree), '单元测试审查');
+typeInto(bodyFieldOf(panel.tree), '请审查单元测试的断言与覆盖率，找出变异测试盲点。');
+panel.render();
+click(buttons(panel.tree, '保存', true)[0]);
+panel.render();
+
+click(buttons(panel.tree, '新增', true)[0]);
+panel.render();
+typeInto(titleFieldOf(panel.tree), '海报生成');
+typeInto(bodyFieldOf(panel.tree), '生成一张 SVG 图片，插画风格的海报。');
+panel.render();
+click(buttons(panel.tree, '保存', true)[0]);
+panel.render();
+
+click(buttons(panel.tree, '自动分组', true)[0]);
+panel.render();
+const autoNames = (storedGroups() ?? []).map((group) => group.name);
+check('自动分组生成了「测试与质量」', autoNames.includes('测试与质量'), autoNames.join(','));
+check('自动分组生成了「图像与设计」', autoNames.includes('图像与设计'), autoNames.join(','));
+check(
+  '单元测试类提示词归入「测试与质量」',
+  groupNameOfPrompt('单元测试审查') === '测试与质量',
+  String(groupNameOfPrompt('单元测试审查')),
+);
+check(
+  '图像类提示词归入「图像与设计」',
+  groupNameOfPrompt('海报生成') === '图像与设计',
+  String(groupNameOfPrompt('海报生成')),
+);
+check('面板显示自动分组结果', textOf(panel.tree).includes('已自动分组'));
+check(
+  '没有明显类别的提示词保持未分组',
+  JSON.parse(memory.get('dsh.prompt-library.v1')).prompts.find((p) => p.title === '第二行才是重点')
+    ?.groupId === undefined,
+);
+
+// 折叠分组后再搜索：命中项必须自动展开，否则会被误判成"没搜到"。
+const testGroupToggle = buttons(panel.tree, '测试与质量')[0];
+check('找到「测试与质量」分组折叠按钮', testGroupToggle !== undefined);
+click(testGroupToggle);
+panel.render();
+check('折叠后组内行隐藏', !textOf(panel.tree).includes('单元测试审查'));
+typeInto(searchFieldOf(panel.tree), '单元测试');
+panel.render();
+check('搜索命中时折叠分组自动展开', textOf(panel.tree).includes('单元测试审查'));
+typeInto(searchFieldOf(panel.tree), '');
+panel.render();
+
+// /prompt 弹窗按分组排序（option.group），组内最新在前、未分组垫底。
+const groupedOptions = await cmd.ui.options({ sessionId: 's1' });
+check(
+  '命令选项携带分组信息（option.group）',
+  groupedOptions.every(
+    (o) => o.group && typeof o.group.name === 'string' && typeof o.group.label === 'string',
+  ),
+  JSON.stringify(groupedOptions.map((o) => o.group?.label)),
+);
+check(
+  '首项属于第一个分组（按分组排序，不再是纯创建顺序）',
+  groupedOptions[0]?.group?.label === '测试与质量',
+  String(groupedOptions[0]?.group?.label),
+);
+check(
+  '同一分组的选项连续排列',
+  (() => {
+    const names = groupedOptions.map((o) => o.group?.name);
+    const seen = new Set();
+    for (let i = 0; i < names.length; i += 1) {
+      if (i > 0 && names[i] !== names[i - 1] && seen.has(names[i])) return false;
+      seen.add(names[i]);
+    }
+    return true;
+  })(),
+  groupedOptions.map((o) => o.group?.label).join(','),
+);
+check('组内最新在前', groupedOptions[0]?.label === '单元测试审查', String(groupedOptions[0]?.label));
+check(
+  '未分组选项排在最后',
+  groupedOptions[groupedOptions.length - 1]?.group?.label === '未分组',
+  String(groupedOptions[groupedOptions.length - 1]?.group?.label),
+);
+
+section('16. 旧数据自动迁移（首次加载老数据即分组）');
+const beforeModules = captured.length;
+memory.clear();
+memory.set(
+  'dsh.prompt-library.v1',
+  JSON.stringify({
+    prompts: [
+      {
+        id: 'legacy-1',
+        title: '单元测试检查',
+        body: '单元测试 断言 覆盖率',
+        createdAt: '2026-01-01T00:00:00.000Z',
+      },
+      {
+        id: 'legacy-2',
+        title: '海报设计',
+        body: '生成 SVG 图片 插画',
+        createdAt: '2026-01-01T00:00:00.000Z',
+      },
+    ],
+  }),
+);
+await import(new URL('./client.js?legacy-migration', import.meta.url).href);
+check('加载了新的模块实例', captured.length === beforeModules + 1, `got ${captured.length}`);
+const legacySpec = captured[captured.length - 1];
+legacySpec.factory(requireStub);
+const migrated = JSON.parse(memory.get('dsh.prompt-library.v1'));
+check('迁移后数据带 groups 字段', Array.isArray(migrated.groups));
+check(
+  '两条老提示词都被分配了 groupId',
+  migrated.prompts.every((prompt) => typeof prompt.groupId === 'string'),
+  JSON.stringify(migrated.prompts),
+);
+const migratedNames = migrated.groups.map((group) => group.name);
+check(
+  '按内容生成了两个分组',
+  migratedNames.includes('测试与质量') && migratedNames.includes('图像与设计'),
+  migratedNames.join(','),
+);
+
+// 迁移是一次性的：数据里已有 groups 字段后再次加载不应重复归类/重建分组。
+await import(new URL('./client.js?legacy-migration-2', import.meta.url).href);
+const secondSpec = captured[captured.length - 1];
+secondSpec.factory(requireStub);
+const migratedAgain = JSON.parse(memory.get('dsh.prompt-library.v1'));
+check(
+  '再次加载不重复迁移（分组数不变）',
+  migratedAgain.groups.length === migrated.groups.length,
+  `${migratedAgain.groups.length} vs ${migrated.groups.length}`,
+);
+check(
+  '再次加载不重复迁移（groupId 稳定）',
+  migratedAgain.prompts.map((p) => p.groupId).join(',') ===
+    migrated.prompts.map((p) => p.groupId).join(','),
 );
 
 console.log(failures === 0 ? '\n全部通过。' : `\n${failures} 项失败。`);

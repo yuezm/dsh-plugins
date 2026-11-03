@@ -43,7 +43,7 @@ window.__ModuleLoader__.load({
      * 防止升级时漏改。面板底部会显示它——DSH 的插件管理器没有版本选择器，
      * 你只能靠"跑着的代码自己报出版本"来确认装的是哪一版。
      */
-    const PLUGIN_VERSION = '1.2.1';
+    const PLUGIN_VERSION = '1.3.0';
     /** 持久化键，沿用 `dsh.<feature>.<version>` 约定。 */
     const STORAGE_KEY = 'dsh.prompt-library.v1';
     /** 样式标签身份，用于幂等注入与卸载移除。 */
@@ -70,36 +70,211 @@ window.__ModuleLoader__.load({
       return `p-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     }
 
-    /** 从 localStorage 读取提示词；任何异常都退化为空库，绝不让面板挂掉。 */
-    function readPrompts() {
+    /** 生成一个分组 id。前缀与提示词 id 区分开，避免肉眼混淆。 */
+    function newGroupId() {
+      return `g-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    }
+
+    /**
+     * 从 localStorage 读取整份数据；任何异常都退化为空库，绝不让面板挂掉。
+     *
+     * 兼容旧版（≤1.2.x）只有 `{ prompts: [...] }`、没有 `groups` 字段的格式。
+     * 当「有提示词、但整份数据里没有 groups 字段」时，标记为需要一次性自动分组迁移：
+     * 新版第一次加载就会把已有提示词按内容归类。一旦落盘过带 groups 的数据，
+     * 这个标记就消失——用户之后清空分组也不会被重新自动分类。
+     */
+    function readState() {
       try {
         const raw = window.localStorage.getItem(STORAGE_KEY);
-        if (raw === null) return [];
+        if (raw === null) return { prompts: [], groups: [], needsGroupMigration: false };
         const parsed = JSON.parse(raw);
-        if (!parsed || !Array.isArray(parsed.prompts)) return [];
-        return parsed.prompts.filter(
-          (item) => item && typeof item.id === 'string' && typeof item.body === 'string',
-        );
+        if (!parsed || typeof parsed !== 'object') {
+          return { prompts: [], groups: [], needsGroupMigration: false };
+        }
+        const prompts = Array.isArray(parsed.prompts)
+          ? parsed.prompts.filter(
+              (item) => item && typeof item.id === 'string' && typeof item.body === 'string',
+            )
+          : [];
+        const hasGroups = Array.isArray(parsed.groups);
+        const groups = hasGroups
+          ? parsed.groups.filter(
+              (item) => item && typeof item.id === 'string' && typeof item.name === 'string',
+            )
+          : [];
+        return { prompts, groups, needsGroupMigration: !hasGroups && prompts.length > 0 };
       } catch (error) {
         console.error('[prompt-library] 读取失败：', error);
-        return [];
+        return { prompts: [], groups: [], needsGroupMigration: false };
       }
+    }
+
+    /**
+     * 自动分组规则（纯启发式，全部在本地跑，不依赖模型）。
+     *
+     * 每个分类的得分 = 命中关键词的长度之和（越具体的关键词越长，权重越高），
+     * 取得分最高的分类。比对所有分类都不命中时返回 null（保持未分组）。
+     * 规则只作用于「未分组」的提示词；用户手动指定的分组不会被覆盖。
+     */
+    const CATEGORY_RULES = [
+      {
+        name: '测试与质量',
+        keywords: [
+          '单元测试', '测试用例', '测试', '断言', '覆盖率', '变异测试', '质量审计',
+          'jest', 'vitest', 'mocha', 'pytest', 'junit', 'mock', 'test',
+        ],
+      },
+      {
+        name: '代码审查与重构',
+        keywords: ['代码审查', '代码评审', 'code review', '重构', 'refactor', '坏味道', '整洁代码', '边界条件', 'review'],
+      },
+      {
+        name: '图像与设计',
+        keywords: [
+          'generate an image', 'text-to-image', 'svg', '图片', '图像', '插画', '海报',
+          '图标', '配色', '视觉', '设计', 'mockup', 'wireframe', 'image', 'images', 'draw', 'logo', 'banner',
+        ],
+      },
+      {
+        name: '写作与文案',
+        keywords: ['文案', '写作', '撰写', '总结', '摘要', '报告', '邮件', '公众号', '润色', '改写', '周报', 'article', 'blog', '文章'],
+      },
+      {
+        name: '翻译与本地化',
+        keywords: ['翻译', 'translate', 'localization', '本地化', '多语言', '英文', '中文'],
+      },
+      {
+        name: '数据分析',
+        keywords: ['数据分析', '数据清洗', '数据', 'sql', 'pandas', 'excel', '报表', '指标', '可视化', 'dashboard', '统计'],
+      },
+      {
+        name: '产品与需求',
+        keywords: ['产品需求', '需求分析', '用户故事', '竞品', '调研', '原型', 'prd', 'mvp', '产品'],
+      },
+      {
+        name: '架构与技术方案',
+        keywords: ['技术方案', '系统设计', '设计文档', '架构', '数据库', '微服务', 'schema', 'api', '接口'],
+      },
+      {
+        name: '运维与部署',
+        keywords: ['部署', '运维', 'docker', 'kubernetes', 'k8s', '监控', '告警', '日志', '发布上线'],
+      },
+      {
+        name: '教学与解释',
+        keywords: ['解释', '讲解', '教学', '科普', '入门', '学习', '通俗'],
+      },
+      {
+        name: '提示词工程',
+        keywords: ['提示词', 'prompt', 'prompts', '角色设定', '扮演', 'system prompt'],
+      },
+    ];
+
+    /** 纯 ASCII 关键词用「词边界」匹配，避免 review 命中 preview、test 命中 latest 这类误判。 */
+    function isAsciiKeyword(keyword) {
+      return /^[\x20-\x7e]+$/.test(keyword);
+    }
+
+    /** 统计 ASCII 关键词作为独立词出现的次数；最多计 2 次，避免长文重复刷分。 */
+    function countAsciiWord(text, keyword) {
+      const escaped = keyword.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const pattern = new RegExp(`(?<![a-z0-9])${escaped}(?![a-z0-9])`, 'g');
+      const matches = text.match(pattern);
+      return matches === null ? 0 : Math.min(matches.length, 2);
+    }
+
+    /** 给单条提示词推断分组名；没有明显分类时返回 null。 */
+    function classifyPrompt(prompt) {
+      const text = `${prompt.title ?? ''}\n${prompt.body ?? ''}`.toLowerCase();
+      let best = null;
+      let bestScore = 0;
+      for (const rule of CATEGORY_RULES) {
+        let score = 0;
+        const matched = [];
+        // 先长后短：长关键词已命中时，跳过被它包含的短关键词，避免「单元测试」+「测试」重复累加。
+        const keywords = [...rule.keywords].sort((a, b) => b.length - a.length);
+        for (const keyword of keywords) {
+          const lower = keyword.toLowerCase();
+          if (matched.some((longer) => longer !== lower && longer.includes(lower))) continue;
+          let hits = 0;
+          if (isAsciiKeyword(keyword)) hits = countAsciiWord(text, keyword);
+          else if (text.includes(lower)) hits = 1;
+          if (hits > 0) {
+            score += keyword.length * hits;
+            matched.push(lower);
+          }
+        }
+        if (score > bestScore) {
+          bestScore = score;
+          best = rule.name;
+        }
+      }
+      return best;
+    }
+
+    /**
+     * 把「未分组」的提示词自动归类：按分类名找已有分组，没有就新建一个。
+     * 纯函数，不改动传入数组，返回新的 prompts/groups 与统计。
+     */
+    function autoAssign(prompts, groups) {
+      const nextGroups = groups.map((group) => ({ ...group }));
+      const byName = new Map(nextGroups.map((group) => [group.name, group]));
+      const validIds = new Set(nextGroups.map((group) => group.id));
+      let created = 0;
+      let assigned = 0;
+      let unmatched = 0;
+      const nextPrompts = prompts.map((prompt) => {
+        // 已有有效分组的不动；groupId 缺失或指向已删除分组的，视为未分组。
+        if (typeof prompt.groupId === 'string' && validIds.has(prompt.groupId)) return prompt;
+        const name = classifyPrompt(prompt);
+        if (name === null) {
+          unmatched += 1;
+          return prompt;
+        }
+        let group = byName.get(name);
+        if (group === undefined) {
+          group = { id: newGroupId(), name, createdAt: new Date().toISOString() };
+          byName.set(name, group);
+          nextGroups.push(group);
+          created += 1;
+        }
+        assigned += 1;
+        return { ...prompt, groupId: group.id };
+      });
+      return { prompts: nextPrompts, groups: nextGroups, created, assigned, unmatched };
+    }
+
+    /** 把自动分组统计格式化成面板提示；没有可报告的内容时返回 null。 */
+    function formatAutoSummary(result) {
+      if (result === null || result === undefined) return null;
+      if (result.assigned === 0) {
+        return result.unmatched > 0
+          ? `没有可自动归类的提示词（${result.unmatched} 条未匹配）`
+          : null;
+      }
+      return `已自动分组：新建 ${result.created} 组，归类 ${result.assigned} 条${
+        result.unmatched > 0 ? `，${result.unmatched} 条未匹配` : ''
+      }`;
     }
 
     /**
      * 极简可订阅存储。
      *
-     * 只持久化 `prompts`：`pending` / `result` 是跨组件的一次性意图与回执，
-     * 落盘会导致下次启动误触发插入。
+     * 持久化 `prompts` 与 `groups`；`pending` / `result` / `autoGroupResult`
+     * 是一次性意图与回执，不落盘（落盘会导致下次启动误触发插入）。
      */
     function createLibrary() {
+      const initial = readState();
       let state = {
-        /** 持久数据：{ id, title, body, createdAt }[] */
-        prompts: readPrompts(),
+        /** 持久数据：{ id, title, body, createdAt, groupId? }[] */
+        prompts: initial.prompts,
+        /** 持久数据：{ id, name, createdAt }[] */
+        groups: initial.groups,
         /** 待插入意图：面板/命令写，目标会话的中继消费。{ text, sessionId, at } */
         pending: null,
         /** 最近一次插入回执：{ ok, reason, text, at }。 */
         result: null,
+        /** 最近一次自动分组的回执：{ created, assigned, unmatched }（不持久化）。 */
+        autoGroupResult: null,
       };
       const listeners = new Set();
 
@@ -115,11 +290,31 @@ window.__ModuleLoader__.load({
 
       const persist = () => {
         try {
-          window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ prompts: state.prompts }));
+          window.localStorage.setItem(
+            STORAGE_KEY,
+            JSON.stringify({ prompts: state.prompts, groups: state.groups }),
+          );
         } catch (error) {
           console.error('[prompt-library] 写入失败：', error);
         }
       };
+
+      // 旧数据一次性迁移：新版第一次加载就把已有提示词按内容自动归类。
+      // 只做一次——迁移后数据里就带 groups 字段，下次加载不再触发。
+      if (initial.needsGroupMigration) {
+        const migrated = autoAssign(state.prompts, state.groups);
+        state = {
+          ...state,
+          prompts: migrated.prompts,
+          groups: migrated.groups,
+          autoGroupResult: {
+            created: migrated.created,
+            assigned: migrated.assigned,
+            unmatched: migrated.unmatched,
+          },
+        };
+        persist();
+      }
 
       const update = (patch) => {
         state = { ...state, ...patch };
@@ -132,23 +327,30 @@ window.__ModuleLoader__.load({
           listeners.add(listener);
           return () => listeners.delete(listener);
         },
-        /** 新增一条，返回新 id。标题留空时取正文首行。 */
-        add(title, body) {
+        /** 新增一条，返回新 id。标题留空时取正文首行；groupId 为空表示未分组。 */
+        add(title, body, groupId) {
           const prompt = {
             id: newId(),
             title: title.trim() || deriveTitle(body),
             body,
             createdAt: new Date().toISOString(),
+            ...(typeof groupId === 'string' && groupId !== '' ? { groupId } : {}),
           };
           update({ prompts: [...state.prompts, prompt] });
           persist();
           return prompt.id;
         },
-        edit(id, title, body) {
+        edit(id, title, body, groupId) {
           update({
             prompts: state.prompts.map((item) =>
               item.id === id
-                ? { ...item, title: title.trim() || deriveTitle(body), body }
+                ? {
+                    ...item,
+                    title: title.trim() || deriveTitle(body),
+                    body,
+                    groupId:
+                      typeof groupId === 'string' && groupId !== '' ? groupId : undefined,
+                  }
                 : item,
             ),
           });
@@ -157,6 +359,60 @@ window.__ModuleLoader__.load({
         remove(id) {
           update({ prompts: state.prompts.filter((item) => item.id !== id) });
           persist();
+        },
+        /** 新建分组；重名时复用已有分组。返回 { id, created }（名称空则返回 null）。 */
+        addGroup(name) {
+          const clean = name.trim();
+          if (clean === '') return null;
+          const existing = state.groups.find((group) => group.name === clean);
+          if (existing !== undefined) return { id: existing.id, created: false };
+          const group = { id: newGroupId(), name: clean, createdAt: new Date().toISOString() };
+          update({ groups: [...state.groups, group] });
+          persist();
+          return { id: group.id, created: true };
+        },
+        /** 重命名分组。成功返回 true；名称为空、或与其它分组重名时返回 false。 */
+        renameGroup(id, name) {
+          const clean = name.trim();
+          if (clean === '') return false;
+          if (state.groups.some((group) => group.id !== id && group.name === clean)) return false;
+          update({
+            groups: state.groups.map((group) =>
+              group.id === id ? { ...group, name: clean } : group,
+            ),
+          });
+          persist();
+          return true;
+        },
+        /** 删除分组：组内提示词回到「未分组」，不连带删除提示词。 */
+        removeGroup(id) {
+          update({
+            groups: state.groups.filter((group) => group.id !== id),
+            prompts: state.prompts.map((prompt) =>
+              prompt.groupId === id ? { ...prompt, groupId: undefined } : prompt,
+            ),
+          });
+          persist();
+        },
+        /** 把「未分组」的提示词按内容自动归类。返回 { created, assigned, unmatched }。 */
+        autoGroup() {
+          const result = autoAssign(state.prompts, state.groups);
+          const summary = {
+            created: result.created,
+            assigned: result.assigned,
+            unmatched: result.unmatched,
+          };
+          if (result.assigned === 0) {
+            update({ autoGroupResult: summary });
+            return summary;
+          }
+          update({
+            prompts: result.prompts,
+            groups: result.groups,
+            autoGroupResult: summary,
+          });
+          persist();
+          return summary;
         },
         /** 面板/命令的「使用」：写下意图（含目标会话），由该会话的中继执行插入。 */
         requestInsert(text, sessionId) {
@@ -208,7 +464,12 @@ window.__ModuleLoader__.load({
       if (needle === '') return prompts;
       return prompts.filter(
         (item) =>
-          item.title.toLowerCase().includes(needle) || item.body.toLowerCase().includes(needle),
+          String(item.title ?? '')
+            .toLowerCase()
+            .includes(needle) ||
+          String(item.body ?? '')
+            .toLowerCase()
+            .includes(needle),
       );
     }
 
@@ -260,14 +521,19 @@ window.__ModuleLoader__.load({
     function PromptsPage() {
       const state = useLibrary();
       const [query, setQuery] = React.useState('');
-      // null = 未在编辑；{ id: null } = 新增；{ id } = 编辑既有条目
-      const [editing, setEditing] = React.useState(null);
+      // 统一对话框：null / { kind:'prompt', id, title, body, groupId } / { kind:'group', id, name }
+      const [dialog, setDialog] = React.useState(null);
       const [confirmingId, setConfirmingId] = React.useState(null);
+      const [confirmingGroupId, setConfirmingGroupId] = React.useState(null);
+      const [collapsed, setCollapsed] = React.useState({});
+      // 迁移/自动分组的结果存在 state.autoGroupResult 里；面板挂载时消费一次，让用户看到发生了什么。
+      const [notice, setNotice] = React.useState(() => formatAutoSummary(state.autoGroupResult));
       const dialogRef = React.useRef(null);
       const titleInputRef = React.useRef(null);
       const bodyInputRef = React.useRef(null);
-      /** 编辑器以模态层呈现；只有它的打开/关闭才需要移动焦点。 */
-      const dialogOpen = editing !== null;
+      const groupNameInputRef = React.useRef(null);
+      /** 对话框以模态层呈现；只有它的打开/关闭才需要移动焦点。 */
+      const dialogOpen = dialog !== null;
 
       /**
        * 弹窗打开时把焦点送进表单：新增先填标题，编辑优先正文（点【编辑】通常就是改正文）。
@@ -279,8 +545,10 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         if (!dialogOpen) return undefined;
         const previous = typeof document === 'undefined' ? null : document.activeElement;
-        const target =
-          editing !== null && editing.id === null ? titleInputRef.current : bodyInputRef.current;
+        let target = null;
+        if (dialog.kind === 'group') target = groupNameInputRef.current;
+        else if (dialog.id === null) target = titleInputRef.current;
+        else target = bodyInputRef.current;
         if (target !== null && target !== undefined && typeof target.focus === 'function') {
           target.focus();
           if (typeof target.setSelectionRange === 'function') {
@@ -309,7 +577,7 @@ window.__ModuleLoader__.load({
         const onKeyDown = (event) => {
           if (event.key !== 'Escape' || event.isComposing) return;
           event.preventDefault();
-          setEditing(null);
+          setDialog(null);
         };
         document.addEventListener('keydown', onKeyDown);
         return () => document.removeEventListener('keydown', onKeyDown);
@@ -321,7 +589,7 @@ window.__ModuleLoader__.load({
         if (event.nativeEvent !== undefined && event.nativeEvent.isComposing === true) return;
         if (event.key === 'Escape') {
           event.preventDefault();
-          setEditing(null);
+          setDialog(null);
           return;
         }
         if (event.key !== 'Tab') return;
@@ -359,25 +627,144 @@ window.__ModuleLoader__.load({
       };
 
       const visible = filterPrompts(state.prompts, query);
+      const groupById = new Map(state.groups.map((group) => [group.id, group]));
+      const sections = [];
+      for (const group of state.groups) {
+        const items = visible.filter((prompt) => prompt.groupId === group.id);
+        // 搜索时只保留有命中的分组；无搜索时保留空分组，方便看见刚建好的新组。
+        if (items.length > 0 || query.trim() === '') sections.push({ key: group.id, group, items });
+      }
+      const ungrouped = visible.filter(
+        (prompt) => typeof prompt.groupId !== 'string' || !groupById.has(prompt.groupId),
+      );
+      if (ungrouped.length > 0) sections.push({ key: '__ungrouped__', group: null, items: ungrouped });
 
       const startAdd = () => {
         setConfirmingId(null);
-        setEditing({ id: null, title: '', body: '' });
+        setConfirmingGroupId(null);
+        setNotice(null);
+        setDialog({ kind: 'prompt', id: null, title: '', body: '', groupId: '' });
       };
 
       const startEdit = (prompt) => {
         setConfirmingId(null);
-        setEditing({ id: prompt.id, title: prompt.title, body: prompt.body });
+        setConfirmingGroupId(null);
+        setNotice(null);
+        setDialog({
+          kind: 'prompt',
+          id: prompt.id,
+          title: prompt.title,
+          body: prompt.body,
+          groupId:
+            typeof prompt.groupId === 'string' && groupById.has(prompt.groupId)
+              ? prompt.groupId
+              : '',
+        });
+      };
+
+      const startAddGroup = () => {
+        setConfirmingId(null);
+        setConfirmingGroupId(null);
+        setNotice(null);
+        setDialog({ kind: 'group', id: null, name: '' });
+      };
+
+      const startRenameGroup = (group) => {
+        setConfirmingId(null);
+        setConfirmingGroupId(null);
+        setNotice(null);
+        setDialog({ kind: 'group', id: group.id, name: group.name });
       };
 
       const save = () => {
-        if (editing === null) return;
-        const body = editing.body.trim();
+        if (dialog === null) return;
+        if (dialog.kind === 'group') {
+          const name = dialog.name.trim();
+          if (name === '') return;
+          if (dialog.id === null) {
+            const result = library.addGroup(name);
+            if (result !== null && result.created === false) {
+              setNotice('已存在同名分组，直接复用');
+            }
+            setDialog(null);
+            return;
+          }
+          if (library.renameGroup(dialog.id, name) === false) {
+            // 撞名/空名不关闭对话框，给出提示，避免"点了没反应"。
+            setNotice('该分组名已存在，请换一个');
+            return;
+          }
+          setDialog(null);
+          return;
+        }
+        const body = dialog.body.trim();
         if (body === '') return;
-        if (editing.id === null) library.add(editing.title, body);
-        else library.edit(editing.id, editing.title, body);
-        setEditing(null);
+        if (dialog.id === null) library.add(dialog.title, body, dialog.groupId);
+        else library.edit(dialog.id, dialog.title, body, dialog.groupId);
+        setDialog(null);
       };
+
+      const runAutoGroup = () => {
+        if (state.prompts.length === 0) {
+          setNotice('还没有提示词');
+          return;
+        }
+        const result = library.autoGroup();
+        if (result.assigned === 0 && result.unmatched === 0) {
+          setNotice('所有提示词都已在分组中');
+          return;
+        }
+        setNotice(formatAutoSummary(result) ?? '所有提示词都已在分组中');
+      };
+
+      const renderRow = (prompt) =>
+        h('li', { key: prompt.id, className: 'pl-row' }, [
+          h('div', { key: 'main', className: 'pl-row-main' }, [
+            h('div', { key: 'title', className: 'pl-row-title' }, prompt.title),
+            h('div', { key: 'body', className: 'pl-row-body' }, preview(prompt.body)),
+          ]),
+          h('div', { key: 'actions', className: 'pl-row-actions' }, [
+            h(
+              'button',
+              {
+                key: 'use',
+                type: 'button',
+                className: 'pl-btn pl-btn-use',
+                onClick: () => library.requestInsert(prompt.body, sessionQuery.currentId()),
+              },
+              '使用',
+            ),
+            h(
+              'button',
+              { key: 'edit', type: 'button', className: 'pl-btn', onClick: () => startEdit(prompt) },
+              '编辑',
+            ),
+            confirmingId === prompt.id
+              ? h(
+                  'button',
+                  {
+                    key: 'confirm',
+                    type: 'button',
+                    className: 'pl-btn pl-btn-danger',
+                    onClick: () => {
+                      library.remove(prompt.id);
+                      setConfirmingId(null);
+                    },
+                  },
+                  '确认删除',
+                )
+              : h(
+                  'button',
+                  {
+                    key: 'delete',
+                    type: 'button',
+                    className: 'pl-btn pl-btn-danger-ghost',
+                    onClick: () => setConfirmingId(prompt.id),
+                  },
+                  '删除',
+                ),
+          ]),
+        ]);
 
       const status =
         state.pending !== null
@@ -395,14 +782,28 @@ window.__ModuleLoader__.load({
             h(
               'p',
               { key: 'intro', className: 'pl-intro' },
-              `共 ${state.prompts.length} 条${query.trim() === '' ? '' : `，匹配 ${visible.length} 条`}`,
+              `共 ${state.prompts.length} 条 · ${state.groups.length} 组${
+                query.trim() === '' ? '' : `，匹配 ${visible.length} 条`
+              }`,
             ),
           ]),
-          h(
-            'button',
-            { key: 'add', type: 'button', className: 'pl-btn pl-btn-primary', onClick: startAdd },
-            '新增',
-          ),
+          h('div', { key: 'actions', className: 'pl-head-actions' }, [
+            h(
+              'button',
+              { key: 'auto', type: 'button', className: 'pl-btn', onClick: runAutoGroup },
+              '自动分组',
+            ),
+            h(
+              'button',
+              { key: 'newGroup', type: 'button', className: 'pl-btn', onClick: startAddGroup },
+              '新建分组',
+            ),
+            h(
+              'button',
+              { key: 'add', type: 'button', className: 'pl-btn pl-btn-primary', onClick: startAdd },
+              '新增',
+            ),
+          ]),
         ]),
 
         h('div', { key: 'search', className: 'pl-search' }, [
@@ -417,13 +818,16 @@ window.__ModuleLoader__.load({
           }),
         ]),
 
+        notice === null
+          ? null
+          : h('p', { key: 'notice', className: 'pl-notice', role: 'status' }, notice),
+
         status === null
           ? null
           : h('p', { key: 'status', className: 'pl-status', role: 'status' }, status),
 
-        // 弹出规则：新增与编辑统一使用「视口居中的模态层」，不跟随列表滚动位置。
-        // 这样无论从列表顶部还是最底部触发，编辑框都出现在同一处、必然可见。
-        editing === null
+        // 弹出规则：新增/编辑提示词与新建/重命名分组统一使用「视口居中的模态层」。
+        dialog === null
           ? null
           : h(
               'div',
@@ -433,7 +837,7 @@ window.__ModuleLoader__.load({
                 // 点遮罩空白处取消；点弹窗本体（含输入框）不会误关。
                 onMouseDown: (event) => {
                   if (event.button !== 0) return;
-                  if (event.target === event.currentTarget) setEditing(null);
+                  if (event.target === event.currentTarget) setDialog(null);
                 },
               },
               h(
@@ -452,42 +856,89 @@ window.__ModuleLoader__.load({
                     h(
                       'h2',
                       { key: 'title', id: 'pl-dialog-title', className: 'pl-dialog-title' },
-                      editing.id === null ? '新增提示词' : '编辑提示词',
+                      dialog.kind === 'group'
+                        ? dialog.id === null
+                          ? '新建分组'
+                          : '重命名分组'
+                        : dialog.id === null
+                          ? '新增提示词'
+                          : '编辑提示词',
                     ),
                     h(
                       'p',
                       { key: 'hint', className: 'pl-dialog-hint' },
-                      editing.id === null ? '标题可留空，默认取正文首行。' : '保存后立即生效。',
+                      dialog.kind === 'group'
+                        ? '把同一类的提示词归到一起。'
+                        : dialog.id === null
+                          ? '标题可留空，默认取正文首行。'
+                          : '保存后立即生效。',
                     ),
                   ]),
-                  h(
-                    'label',
-                    { key: 'titleField', className: 'pl-field' },
-                    h('span', { className: 'pl-label' }, '标题'),
-                    h('input', {
-                      ref: titleInputRef,
-                      type: 'text',
-                      className: 'pl-input',
-                      value: editing.title,
-                      placeholder: '留空则取正文首行',
-                      onChange: (event) =>
-                        setEditing((prev) => ({ ...prev, title: event.target.value })),
-                    }),
-                  ),
-                  h(
-                    'label',
-                    { key: 'bodyField', className: 'pl-field' },
-                    h('span', { className: 'pl-label' }, '正文'),
-                    h('textarea', {
-                      ref: bodyInputRef,
-                      className: 'pl-textarea',
-                      value: editing.body,
-                      rows: 8,
-                      placeholder: '提示词正文',
-                      onChange: (event) =>
-                        setEditing((prev) => ({ ...prev, body: event.target.value })),
-                    }),
-                  ),
+                  dialog.kind === 'group'
+                    ? h(
+                        'label',
+                        { key: 'nameField', className: 'pl-field' },
+                        h('span', { className: 'pl-label' }, '分组名称'),
+                        h('input', {
+                          ref: groupNameInputRef,
+                          type: 'text',
+                          className: 'pl-input',
+                          value: dialog.name,
+                          placeholder: '分组名称',
+                          onChange: (event) =>
+                            setDialog((prev) => ({ ...prev, name: event.target.value })),
+                        }),
+                      )
+                    : [
+                        h(
+                          'label',
+                          { key: 'titleField', className: 'pl-field' },
+                          h('span', { className: 'pl-label' }, '标题'),
+                          h('input', {
+                            ref: titleInputRef,
+                            type: 'text',
+                            className: 'pl-input',
+                            value: dialog.title,
+                            placeholder: '留空则取正文首行',
+                            onChange: (event) =>
+                              setDialog((prev) => ({ ...prev, title: event.target.value })),
+                          }),
+                        ),
+                        h(
+                          'label',
+                          { key: 'bodyField', className: 'pl-field' },
+                          h('span', { className: 'pl-label' }, '正文'),
+                          h('textarea', {
+                            ref: bodyInputRef,
+                            className: 'pl-textarea',
+                            value: dialog.body,
+                            rows: 8,
+                            placeholder: '提示词正文',
+                            onChange: (event) =>
+                              setDialog((prev) => ({ ...prev, body: event.target.value })),
+                          }),
+                        ),
+                        h(
+                          'label',
+                          { key: 'groupField', className: 'pl-field' },
+                          h('span', { className: 'pl-label' }, '分组'),
+                          h(
+                            'select',
+                            {
+                              className: 'pl-input pl-select',
+                              value: dialog.groupId,
+                              onChange: (event) =>
+                                setDialog((prev) => ({ ...prev, groupId: event.target.value })),
+                            },
+                            [
+                              h('option', { key: 'none', value: '' }, '未分组'),
+                              ...state.groups.map((group) =>
+                                h('option', { key: group.id, value: group.id }, group.name),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
                   h('div', { key: 'actions', className: 'pl-editor-actions' }, [
                     h(
                       'button',
@@ -495,7 +946,10 @@ window.__ModuleLoader__.load({
                         key: 'save',
                         type: 'button',
                         className: 'pl-btn pl-btn-primary',
-                        disabled: editing.body.trim() === '',
+                        disabled:
+                          dialog.kind === 'group'
+                            ? dialog.name.trim() === ''
+                            : dialog.body.trim() === '',
                         onClick: save,
                       },
                       '保存',
@@ -506,7 +960,7 @@ window.__ModuleLoader__.load({
                         key: 'cancel',
                         type: 'button',
                         className: 'pl-btn',
-                        onClick: () => setEditing(null),
+                        onClick: () => setDialog(null),
                       },
                       '取消',
                     ),
@@ -515,7 +969,7 @@ window.__ModuleLoader__.load({
               ),
             ),
 
-        visible.length === 0
+        sections.length === 0
           ? h(
               'p',
               { key: 'empty', className: 'pl-empty' },
@@ -524,63 +978,99 @@ window.__ModuleLoader__.load({
                 : '没有匹配的提示词。',
             )
           : h(
-              'ul',
-              { key: 'list', className: 'pl-list' },
-              // 最新在前：刚添加的条目就在视线处。
-              [...visible].reverse().map((prompt) =>
-                h('li', { key: prompt.id, className: 'pl-row' }, [
-                  h('div', { key: 'main', className: 'pl-row-main' }, [
-                    h('div', { key: 'title', className: 'pl-row-title' }, prompt.title),
-                    h('div', { key: 'body', className: 'pl-row-body' }, preview(prompt.body)),
-                  ]),
-                  h('div', { key: 'actions', className: 'pl-row-actions' }, [
-                    h(
-                      'button',
-                      {
-                        key: 'use',
-                        type: 'button',
-                        className: 'pl-btn pl-btn-use',
-                        onClick: () => library.requestInsert(prompt.body, sessionQuery.currentId()),
-                      },
-                      '使用',
-                    ),
-                    h(
-                      'button',
-                      {
-                        key: 'edit',
-                        type: 'button',
-                        className: 'pl-btn',
-                        onClick: () => startEdit(prompt),
-                      },
-                      '编辑',
-                    ),
-                    confirmingId === prompt.id
+              'div',
+              { key: 'list', className: 'pl-groups' },
+              sections.map((section) => {
+                const group = section.group;
+                // 搜索时强制展开命中分组，否则用户会把"折叠隐藏"误判成"没搜到"。
+                const isCollapsed =
+                  query.trim() === '' && group !== null && collapsed[group.id] === true;
+                return h('section', { key: section.key, className: 'pl-group' }, [
+                  h('header', { key: 'head', className: 'pl-group-head' }, [
+                    group === null
                       ? h(
-                          'button',
-                          {
-                            key: 'confirm',
-                            type: 'button',
-                            className: 'pl-btn pl-btn-danger',
-                            onClick: () => {
-                              library.remove(prompt.id);
-                              setConfirmingId(null);
-                            },
-                          },
-                          '确认删除',
+                          'span',
+                          { key: 'toggle', className: 'pl-group-toggle pl-group-toggle-static' },
+                          [
+                            h('span', { key: 'name', className: 'pl-group-name' }, '未分组'),
+                            h(
+                              'span',
+                              { key: 'count', className: 'pl-group-count' },
+                              String(section.items.length),
+                            ),
+                          ],
                         )
                       : h(
                           'button',
                           {
-                            key: 'delete',
+                            key: 'toggle',
                             type: 'button',
-                            className: 'pl-btn pl-btn-danger-ghost',
-                            onClick: () => setConfirmingId(prompt.id),
+                            className: 'pl-group-toggle',
+                            'aria-expanded': !isCollapsed,
+                            onClick: () =>
+                              setCollapsed((prev) => ({ ...prev, [group.id]: !prev[group.id] })),
                           },
-                          '删除',
+                          [
+                            h('span', { key: 'caret', className: 'pl-caret' }, isCollapsed ? '▸' : '▾'),
+                            h('span', { key: 'name', className: 'pl-group-name' }, group.name),
+                            h(
+                              'span',
+                              { key: 'count', className: 'pl-group-count' },
+                              String(section.items.length),
+                            ),
+                          ],
                         ),
+                    group === null
+                      ? null
+                      : h('div', { key: 'actions', className: 'pl-group-actions' }, [
+                          confirmingGroupId === group.id
+                            ? h(
+                                'button',
+                                {
+                                  key: 'confirmGroup',
+                                  type: 'button',
+                                  className: 'pl-btn pl-btn-danger',
+                                  onClick: () => {
+                                    library.removeGroup(group.id);
+                                    setConfirmingGroupId(null);
+                                  },
+                                },
+                                '确认删除分组',
+                              )
+                            : h(
+                                'button',
+                                {
+                                  key: 'deleteGroup',
+                                  type: 'button',
+                                  className: 'pl-btn pl-btn-danger-ghost',
+                                  onClick: () => {
+                                    setConfirmingId(null);
+                                    setConfirmingGroupId(group.id);
+                                  },
+                                },
+                                '删除分组',
+                              ),
+                          h(
+                            'button',
+                            {
+                              key: 'renameGroup',
+                              type: 'button',
+                              className: 'pl-btn',
+                              onClick: () => startRenameGroup(group),
+                            },
+                            '重命名',
+                          ),
+                        ]),
                   ]),
-                ]),
-              ),
+                  isCollapsed
+                    ? null
+                    : h(
+                        'ul',
+                        { key: 'list', className: 'pl-list' },
+                        [...section.items].reverse().map(renderRow),
+                      ),
+                ]);
+              }),
             ),
 
         // 版本自报。DSH 的插件管理器没有版本选择器，也读不到运行中代码的版本；
@@ -683,6 +1173,20 @@ window.__ModuleLoader__.load({
 .pl-row-actions{display:flex;align-items:center;gap:8px;flex:none}
 .pl-empty{color:var(--dsw-alias-label-tertiary);margin:0;font-size:13px;line-height:20px}
 .pl-footer{color:var(--dsw-alias-label-caption);margin:8px 0 0;font-size:12px;line-height:18px;margin-top:auto;padding-top:12px}
+.pl-head-actions{display:flex;gap:8px;flex:none;align-items:center}
+.pl-notice{color:var(--dsw-alias-state-business-primary);margin:0;font-size:13px;line-height:20px}
+.pl-select{height:40px;width:100%;padding:0 10px}
+.pl-groups{display:flex;flex-direction:column;gap:18px}
+.pl-group{display:flex;flex-direction:column;gap:2px}
+.pl-group-head{display:flex;align-items:center;justify-content:space-between;gap:12px;border-bottom:.5px solid var(--dsw-alias-border-l2);padding:6px 2px}
+.pl-group-toggle{display:inline-flex;align-items:center;gap:8px;background:transparent;border:0;padding:2px 4px;margin:0;cursor:pointer;color:var(--dsw-alias-label-primary);font:inherit;font-size:13px;border-radius:var(--dsw-radius-sm)}
+.pl-group-toggle:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.pl-group-toggle-static{cursor:default}
+.pl-group-toggle-static:hover{background:transparent}
+.pl-caret{width:12px;display:inline-block;color:var(--dsw-alias-label-tertiary)}
+.pl-group-name{font-weight:600}
+.pl-group-count{color:var(--dsw-alias-label-tertiary);font-size:12px;font-weight:400}
+.pl-group-actions{display:flex;align-items:center;gap:8px;flex:none}
 .pl-btn{border:.5px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-md);height:32px;padding:0 12px;font:inherit;font-size:13px;line-height:20px;color:var(--dsw-alias-label-primary);background:transparent;cursor:pointer}
 .pl-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}
 .pl-btn:disabled{opacity:.5;cursor:default}
@@ -794,13 +1298,40 @@ window.__ModuleLoader__.load({
                     empty: '还没有提示词，先去左侧【提示词】面板添加',
                     noResults: '没有匹配的提示词',
                   }),
-                  // 最新在前，与面板列表顺序一致。
-                  options: async () =>
-                    [...library.getState().prompts].reverse().map((prompt) => ({
-                      id: prompt.id,
-                      label: prompt.title,
-                      detail: preview(prompt.body),
-                    })),
+                  // 按分组顺序输出，组内最新在前；未分组垫底。
+                  // popupSelect 支持 option.group = { name, label }，会渲染成吸顶分组标题。
+                  options: async () => {
+                    const { prompts, groups } = library.getState();
+                    const groupById = new Map(groups.map((group) => [group.id, group]));
+                    const buckets = new Map();
+                    for (const group of groups) buckets.set(group.id, []);
+                    const ungrouped = [];
+                    for (const prompt of prompts) {
+                      if (typeof prompt.groupId === 'string' && groupById.has(prompt.groupId)) {
+                        buckets.get(prompt.groupId).push(prompt);
+                      } else {
+                        ungrouped.push(prompt);
+                      }
+                    }
+                    const options = [];
+                    const emit = (items, group) => {
+                      const meta =
+                        group === null
+                          ? { name: '__ungrouped__', label: '未分组' }
+                          : { name: group.id, label: group.name };
+                      for (const prompt of [...items].reverse()) {
+                        options.push({
+                          id: prompt.id,
+                          label: prompt.title,
+                          detail: preview(prompt.body),
+                          group: meta,
+                        });
+                      }
+                    };
+                    for (const group of groups) emit(buckets.get(group.id), group);
+                    if (ungrouped.length > 0) emit(ungrouped, null);
+                    return options;
+                  },
                   onSelect: (option, context) => {
                     // 只认 id，再回库里取正文：不依赖框架是否透传自定义字段。
                     const prompt = library

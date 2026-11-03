@@ -1,9 +1,9 @@
 {
   "name": "@local/dsh-prompt-library",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "private": true,
   "type": "module",
-  "description": "左侧栏提示词库：增删改查与搜索，并把提示词插入当前对话草稿。",
+  "description": "左侧栏提示词库：分组（自动归类）+ 增删改查与搜索，并把提示词插入当前对话草稿。",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js"
