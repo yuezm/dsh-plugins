@@ -10,7 +10,7 @@
 | 位置 | 变化 |
 |---|---|
 | `profiles\web\package.json` | `dependencies` 增加包名；`dsh.profile.bundles` 增加包名 |
-| `profiles\web\node_modules\@local\<name>` | Junction → `profiles\.generations\live\local+<name>+<version>+<hash>\node_modules\...` |
+| `profiles\web\node_modules\<包名>` | Junction → `profiles\.generations\live\local+<name>+<version>+<hash>\node_modules\...`（包名带 scope 时路径才会有 `@scope\` 这一层；本包现已改名为 `dsh-prompt-library`，不再用 `@local/`） |
 | `profiles\web\cordis.patch.yml` | **不记录**我们的行——行由 bundle 自带的 `cordis.patch.yml` 插入 |
 
 注意 `.generations` 位于 `profiles\` 下，**不在** `profiles\web\` 下。
@@ -80,3 +80,36 @@ $p = "$env:DSH_PROFILE_DIR\node_modules\@local\dsh-prompt-library\client.js"
 - 插件管理器**不支持自动更新**：升级需先卸载再安装。
 - 插件管理器的「添加插件」接受：包名（可带版本）、Git 地址、压缩包、**本地绝对路径**。
 - 安装的包必须带 `cordis.patch.yml`（`dsh.bundle.patch`），否则在安装前就被拒绝。
+
+## 通过 GitHub 链接安装（monorepo 子包，已实测）
+
+本仓库是 monorepo，插件在 `packages/prompt-library`，**仓库根目录没有 `package.json`**。
+所以不能直接装 `github:yuezm/dsh-plugins`（根不是包），必须用 pnpm 的 `#path:` 子目录语法：
+
+```
+github:yuezm/dsh-plugins#path:/packages/prompt-library
+```
+
+- 已用 pnpm 11.4.0 实测通过：解析到 `dsh-prompt-library 1.3.0`，安装后的目录里
+  `package.json`、`cordis.patch.yml`、`index.js`、`client.js` 都在。
+- 需要版本/分支：`github:yuezm/dsh-plugins#v1.3.1&path:/packages/prompt-library`
+  （`#` 后是 tag/分支/commit，`&path:/子目录` 还是同一个包）。
+- **不要**把网页地址 `https://github.com/yuezm/dsh-plugins/tree/master/packages/prompt-library`
+  直接喂给 pnpm——它不是合法的 pnpm target，会卡住去拉 tarball。插件市场（dshmarket）
+  的目录项支持 `/tree/` 解析成 `github:repo#path:/sub`，但内置「添加插件」输入框走的是
+  pnpm spec，用上面那条 `github:...#path:/...`。
+
+### 子包能被 GitHub 安装的前提（改造点）
+
+1. 子目录 `package.json` 里 `dsh.bundle.patch` 指向随包发布的 `cordis.patch.yml`（已有）。
+2. `cordis.patch.yml` 的插入行 `name` 必须是**安装后的真实包名**。Git 安装不套 `@local/`
+   前缀，包名就是 `dsh-prompt-library`，所以 patch 里写 `name: dsh-prompt-library`
+   （历史 bug：曾误写成 `dsh-prompt-library'`，多一个单引号，装完 loader 解析不到模块）。
+3. 包目录要随 git tarball 一起被 pack 进去：没有 `files` 白名单时默认整目录打包，
+   `cordis.patch.yml`/`index.js`/`client.js` 都会带上；若以后加了 `files`，记得把它们列全。
+4. 补 `repository.url` + `repository.directory`，插件市场 / 本地还原逻辑才能把子包认回
+   `yuezm/dsh-plugins#path:/packages/prompt-library`。
+
+> 安装来源不同，profile 里的依赖名不同：本地绝对路径安装用声明名（现在是
+> `dsh-prompt-library`，不是旧的 `@local/...`）；Git 安装同样是 `dsh-prompt-library`。
+> 两者的 `cordis.patch.yml` 必须对齐同一个名字。

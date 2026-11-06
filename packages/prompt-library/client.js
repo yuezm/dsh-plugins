@@ -43,7 +43,7 @@ window.__ModuleLoader__.load({
      * 防止升级时漏改。面板底部会显示它——DSH 的插件管理器没有版本选择器，
      * 你只能靠"跑着的代码自己报出版本"来确认装的是哪一版。
      */
-    const PLUGIN_VERSION = '1.3.0';
+    const PLUGIN_VERSION = '1.3.1';
     /** 持久化键，沿用 `dsh.<feature>.<version>` 约定。 */
     const STORAGE_KEY = 'dsh.prompt-library.v1';
     /** 样式标签身份，用于幂等注入与卸载移除。 */

@@ -76,17 +76,33 @@ composer（主会话、嵌入式子代理对话、侧栏 chat 标签都会渲染
 
 ## 安装
 
-1. 侧栏【插件】→ **添加插件**
-2. 输入本地绝对路径：
+本包在 monorepo 子目录 `packages/prompt-library`，通过 GitHub 安装要用 pnpm 的
+`#path:` 子目录语法（`#` 后用 `&` 附带子路径，不要用网页的 `/tree/` 地址，pnpm 不认）。
 
-   ```
-   D:\Codes\github\dsh-plugins\packages\prompt-library
-   ```
+### 方式一：GitHub 链接（分发用）
 
-3. 确认安装并启用 `dsh-prompt-library`
-4. 左侧栏【插件】正下方应出现【提示词】
+侧栏【插件】→ **添加插件**，输入：
+
+```
+github:yuezm/dsh-plugins#path:/packages/prompt-library
+```
+
+需要固定版本 / 分支时：`github:yuezm/dsh-plugins#v1.3.1&path:/packages/prompt-library`
+（`#` 后是 tag/分支/commit，`&path:/...` 仍是同一个子目录）。
+
+### 方式二：本地绝对路径（本机开发用）
+
+```
+D:\Codes\github\dsh-plugins\packages\prompt-library
+```
+
+安装后确认启用 `dsh-prompt-library`，左侧栏【插件】正下方应出现【提示词】。
 
 首次安装后如果侧栏没出现，重启一次 DSH Desktop（新的 JS 模块代需要重启加载）。
+
+> 两种安装来源的包名都是 `dsh-prompt-library`（不再用 `@local/` 前缀），
+> 所以 `cordis.patch.yml` 的插入行 `name` 必须写成 `dsh-prompt-library`——
+> 跟实际装进 `node_modules` 的目录名一致，否则 loader 解析不到模块。
 
 ## 验收
 
@@ -107,7 +123,7 @@ composer（主会话、嵌入式子代理对话、侧栏 chat 标签都会渲染
 | 13 | 【新建分组】→ 填名称 → 保存 | 新分组出现在列表（可折叠），编辑器分组下拉里可选 |
 | 14 | 编辑某条 → 改分组下拉 → 保存 | 条目移动到目标分组 |
 | 15 | 组头【重命名】/【删除分组】 | 重命名立即生效；删除分组需二次确认，组内提示词回到「未分组」且不删除 |
-| 16 | 看面板底部 | 显示 `提示词库 v1.3.0`，与 package.json 一致 |
+| 16 | 看面板底部 | 显示 `提示词库 v1.3.1`，与 package.json 一致 |
 | 17 | 重启 DSH 后再打开面板 | 提示词与分组都还在 |
 
 第 7、9 步是核心：插入**不自动发送**，只落到草稿。Ctrl+Z 应能撤销这一次插入。
@@ -155,15 +171,15 @@ if (guard.kind === "span") {
 
 变更历史见 [CHANGELOG.md](CHANGELOG.md)。
 
-## 升级到本版（1.3.0）
+## 升级到本版（1.3.1）
 
 **必须先卸载再重新安装**——profile 里的副本是旧代码，不会自己更新。
-装完看面板底部：显示 `v1.3.0` 才是新版；仍显示旧版本号说明还是旧副本。
+装完看面板底部：显示 `v1.3.1` 才是新版；仍显示旧版本号说明还是旧副本。
 
 不想点界面时也可以用内容哈希判断（**不要看 `LinkType`，它不可靠**）：
 
 ```powershell
-$p = "$env:DSH_PROFILE_DIR\node_modules\@local\dsh-prompt-library\client.js"
+$p = "$env:DSH_PROFILE_DIR\node_modules\dsh-prompt-library\client.js"
 (Get-FileHash $p).Hash -eq (Get-FileHash packages\prompt-library\client.js).Hash
 ```
 

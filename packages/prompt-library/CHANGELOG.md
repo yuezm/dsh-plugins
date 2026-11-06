@@ -7,6 +7,16 @@ DSH 的插件管理器没有版本选择器，也不提供升级：升级 = 卸�
 所以"现在装的是哪一版"只能靠面板底部自报的版本号确认，或比内容哈希（见
 [docs/dev-notes/install-and-iteration.md](../../docs/dev-notes/install-and-iteration.md)）。
 
+## 1.3.1
+
+- **修复** `cordis.patch.yml` 的插入行 `name` 多了个尾随单引号（`dsh-prompt-library'`），
+  导致从 GitHub 安装后 loader 按 `dsh-prompt-library'` 解析模块失败、插件起不来。
+  现在改为 `name: dsh-prompt-library`，与安装后的真实包名一致。
+- **变更** `package.json` 补 `repository.url` + `repository.directory: packages/prompt-library`，
+  让插件市场 / 还原逻辑能把这颗 monorepo 子包对应回 `yuezm/dsh-plugins#path:/packages/prompt-library`。
+- **新增** 支持通过 GitHub 链接安装，见 README「安装」与
+  [docs/dev-notes/install-and-iteration.md](../../docs/dev-notes/install-and-iteration.md)。
+
 ## 1.3.0
 
 - **新增** 提示词分组：面板按分组分区展示（可折叠），组头显示计数并支持【重命名】【删除分组】；
