@@ -259,7 +259,7 @@ await import(new URL('./client.js', import.meta.url).href);
 section('1. 模块契约');
 check('模块加载器被调用一次', captured.length === 1, `got ${captured.length}`);
 const spec = captured[0] ?? {};
-check('factory id 等于包名', spec.id === '@local/dsh-prompt-library', `got ${JSON.stringify(spec.id)}`);
+check('factory id 等于包名', spec.id === '/dsh-prompt-library', `got ${JSON.stringify(spec.id)}`);
 check('factory 是函数', typeof spec.factory === 'function');
 
 const plugin = typeof spec.factory === 'function' ? spec.factory(requireStub) : {};

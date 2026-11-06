@@ -25,7 +25,7 @@
  *   - 文案为中文硬编码，未走 Client locale 服务（本插件单语言；locale 字典格式无证据）。
  */
 window.__ModuleLoader__.load({
-  id: '@local/dsh-prompt-library',
+  id: 'dsh-prompt-library',
   factory(require) {
     const React = require('react');
     const h = React.createElement;
@@ -47,7 +47,7 @@ window.__ModuleLoader__.load({
     /** 持久化键，沿用 `dsh.<feature>.<version>` 约定。 */
     const STORAGE_KEY = 'dsh.prompt-library.v1';
     /** 样式标签身份，用于幂等注入与卸载移除。 */
-    const STYLE_TAG_ID = '@local/dsh-prompt-library/PromptLibrary.css';
+    const STYLE_TAG_ID = 'dsh-prompt-library/PromptLibrary.css';
 
     //#endregion
 
@@ -1205,7 +1205,7 @@ window.__ModuleLoader__.load({
       const selector = `style[data-plugin-css=${JSON.stringify(STYLE_TAG_ID)}]`;
       if (document.querySelector(selector) !== null) return () => {};
       const tag = document.createElement('style');
-      tag.dataset.plugin = '@local/dsh-prompt-library';
+      tag.dataset.plugin = 'dsh-prompt-library';
       tag.dataset.pluginCss = STYLE_TAG_ID;
       tag.textContent = CSS;
       document.head.appendChild(tag);

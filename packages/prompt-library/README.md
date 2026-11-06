@@ -1,4 +1,4 @@
-# 提示词库（@local/dsh-prompt-library）
+# 提示词库（dsh-prompt-library）
 
 DSH 插件：在 Web GUI 左侧栏【插件】下方新增【提示词】面板，**按分组管理**常用提示词并把它们插入当前对话草稿。
 
@@ -83,7 +83,7 @@ composer（主会话、嵌入式子代理对话、侧栏 chat 标签都会渲染
    D:\Codes\github\dsh-plugins\packages\prompt-library
    ```
 
-3. 确认安装并启用 `@local/dsh-prompt-library`
+3. 确认安装并启用 `dsh-prompt-library`
 4. 左侧栏【插件】正下方应出现【提示词】
 
 首次安装后如果侧栏没出现，重启一次 DSH Desktop（新的 JS 模块代需要重启加载）。

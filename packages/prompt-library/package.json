@@ -1,5 +1,5 @@
 {
-  "name": "@local/dsh-prompt-library",
+  "name": "dsh-prompt-library",
   "version": "1.3.0",
   "private": true,
   "type": "module",
